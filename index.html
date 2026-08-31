@@ -81,6 +81,10 @@
 <body>
 <div class="wrap">
 
+  <!-- زرار إعدادات ثابت ظاهر في كل الشاشات -->
+  <button class="btn-ghost btn-small" id="globalSettingsBtn" onclick="showUrlSettings()"
+    style="position:fixed; top:16px; left:16px; z-index:40;">⚙ إعدادات الربط</button>
+
   <!-- ===================== شاشة الدخول / التسجيل ===================== -->
   <div id="authScreen">
     <header class="brand">
@@ -168,20 +172,6 @@
         <div class="hint">القارئ لازم يكون على وضع USB HID Keyboard، ومتشغّلش برنامج 123Scan في نفس الوقت.</div>
       </div>
 
-      <details class="card config">
-        <summary>⚙ إعدادات الربط مع جوجل شيت</summary>
-        <div class="config-body">
-          <input type="text" id="webAppUrl" placeholder="الصق رابط Google Apps Script (ينتهي بـ /exec)">
-          <button class="btn-accent" id="saveUrlBtn">حفظ الرابط</button>
-          <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:var(--text-dim); width:100%; margin-top:8px;">
-            <input type="checkbox" id="autoSend" style="width:auto;">إرسال مباشر للشيت بمجرد السكان
-          </label>
-          <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:var(--text-dim); width:100%; margin-top:4px;">
-            <input type="checkbox" id="rawDebug" style="width:auto;">وضع اختبار خام (يعرض نص السكان الأصلي)
-          </label>
-        </div>
-      </details>
-
       <div class="card preview" id="rawBox">
         <h2 style="margin-top:0;">نص السكان الخام (Raw)</h2>
         <textarea id="rawOutput" readonly style="width:100%; min-height:70px; padding:10px; border-radius:8px; border:1px solid var(--border); background:#0c1512; color:var(--text); font-family:var(--mono); font-size:12px;"></textarea>
@@ -260,6 +250,26 @@
       <div style="display:flex; gap:10px;">
         <button class="btn-accent" onclick="submitChangePassword()">حفظ</button>
         <button class="btn-ghost" onclick="closeChangePassword()">إلغاء</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== مودال إعدادات الربط (متاح دايمًا حتى قبل تسجيل الدخول) ===================== -->
+  <div id="urlModal" class="hidden" style="position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:50;">
+    <div class="card" style="max-width:420px; width:90%;">
+      <h2>إعدادات الربط مع جوجل شيت</h2>
+      <div id="urlMsg" class="msg"></div>
+      <label>رابط Google Apps Script (ينتهي بـ /exec)</label>
+      <input type="text" id="webAppUrl" placeholder="https://script.google.com/macros/s/xxxxx/exec">
+      <label style="display:flex; align-items:center; gap:6px; margin-bottom:14px;">
+        <input type="checkbox" id="autoSend" style="width:auto;">إرسال مباشر للشيت بمجرد السكان
+      </label>
+      <label style="display:flex; align-items:center; gap:6px; margin-bottom:14px;">
+        <input type="checkbox" id="rawDebug" style="width:auto;">وضع اختبار خام (يعرض نص السكان الأصلي)
+      </label>
+      <div style="display:flex; gap:10px;">
+        <button class="btn-accent" id="saveUrlBtn" onclick="saveUrlSettings()">حفظ</button>
+        <button class="btn-ghost" onclick="closeUrlSettings()">إغلاق</button>
       </div>
     </div>
   </div>
@@ -515,26 +525,33 @@ async function adminToggle(targetEmail) {
   loadUsers();
 }
 
-// ============ إعدادات رابط الشيت ============
+// ============ إعدادات رابط الشيت (مودال ثابت متاح من أي شاشة) ============
 const webAppUrlInput = document.getElementById('webAppUrl');
 const autoSendCheckbox = document.getElementById('autoSend');
 const rawDebugCheckbox = document.getElementById('rawDebug');
 const rawBox = document.getElementById('rawBox');
 const rawOutput = document.getElementById('rawOutput');
 
-webAppUrlInput.value = getWebAppUrl();
-autoSendCheckbox.checked = localStorage.getItem('rasd_autosend') === '1';
-rawDebugCheckbox.checked = localStorage.getItem('rasd_rawdebug') === '1';
-
-document.getElementById('saveUrlBtn').addEventListener('click', () => {
+function showUrlSettings() {
+  webAppUrlInput.value = getWebAppUrl();
+  autoSendCheckbox.checked = localStorage.getItem('rasd_autosend') === '1';
+  rawDebugCheckbox.checked = localStorage.getItem('rasd_rawdebug') === '1';
+  clearMsg('urlMsg');
+  document.getElementById('urlModal').classList.remove('hidden');
+}
+function closeUrlSettings() { document.getElementById('urlModal').classList.add('hidden'); }
+function saveUrlSettings() {
   localStorage.setItem('rasd_webapp_url', webAppUrlInput.value.trim());
-});
-autoSendCheckbox.addEventListener('change', () => {
   localStorage.setItem('rasd_autosend', autoSendCheckbox.checked ? '1' : '0');
-});
-rawDebugCheckbox.addEventListener('change', () => {
   localStorage.setItem('rasd_rawdebug', rawDebugCheckbox.checked ? '1' : '0');
-});
+  showMsg('urlMsg', 'ok', 'تم الحفظ بنجاح');
+  setTimeout(closeUrlSettings, 900);
+}
+
+// لو الرابط لسه فاضي أول ما تفتح الصفحة، افتح مودال الإعدادات تلقائيًا
+if (!getWebAppUrl()) {
+  setTimeout(showUrlSettings, 300);
+}
 
 // ============ تحليل GS1 ============
 const FIXED_LEN_STRICT = { '01': 14, '11': 6, '17': 6 };

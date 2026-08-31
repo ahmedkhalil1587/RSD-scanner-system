@@ -82,8 +82,8 @@
 <body>
 <div class="wrap">
 
-  <!-- زرار إعدادات ثابت ظاهر في كل الشاشات -->
-  <button class="btn-ghost btn-small" id="globalSettingsBtn" onclick="showUrlSettings()"
+  <!-- زرار إعدادات ثابت — يظهر بس لحساب الأدمن بعد تسجيل الدخول -->
+  <button class="btn-ghost btn-small hidden" id="globalSettingsBtn" onclick="showUrlSettings()"
     style="position:fixed; top:16px; left:16px; z-index:40;">⚙ إعدادات الربط</button>
 
   <!-- ===================== شاشة الدخول / التسجيل ===================== -->
@@ -288,7 +288,10 @@ try {
 function saveSession() { localStorage.setItem('rasd_session', JSON.stringify(session)); }
 function clearSession() { session = null; localStorage.removeItem('rasd_session'); }
 
-function getWebAppUrl() { return localStorage.getItem('rasd_webapp_url') || ''; }
+// رابط الـ Web App الافتراضي — بيشتغل تلقائي على أي جهاز من غير ما تحتاج تحفظه يدويًا كل مرة.
+// لو عملت Deploy جديد للكود وتغيّر الرابط، غيّر القيمة دي هنا وارفع الملف تاني.
+const DEFAULT_WEBAPP_URL = 'https://script.google.com/macros/s/AKfycby-rTq5PqDPybR26ZUyGf13Rlali2RoJ_6DH-PBwSiIig36SjApgvepivtpiSAckW8o/exec';
+function getWebAppUrl() { return localStorage.getItem('rasd_webapp_url') || DEFAULT_WEBAPP_URL; }
 
 async function apiCall(payload) {
   const url = getWebAppUrl();
@@ -396,6 +399,7 @@ function backToAuth() {
 
 function logout() {
   clearSession();
+  document.getElementById('globalSettingsBtn').classList.add('hidden');
   showScreen('authScreen');
   showAuthTab('login');
 }
@@ -403,6 +407,7 @@ function logout() {
 function enterApp() {
   document.getElementById('currentUserEmail').textContent = session.email;
   document.getElementById('adminTabBtn').classList.toggle('hidden', session.role !== 'admin');
+  document.getElementById('globalSettingsBtn').classList.toggle('hidden', session.role !== 'admin');
   showAppTab('scan');
   showScreen('appScreen');
   scanInput.value = '';

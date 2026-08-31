@@ -47,6 +47,7 @@ function doPost(e) {
       case 'adminReject':      return handleAdminReject(body);
       case 'adminToggleStatus':return handleAdminToggleStatus(body);
       case 'exportRegulator':  return handleExportRegulator(body);
+      case 'getExportLog':     return handleGetExportLog(body);
       default:
         return jsonOutput({ status: 'error', message: 'إجراء غير معروف' });
     }
@@ -371,6 +372,28 @@ function handleExportRegulator(body) {
     return jsonOutput({ status: 'error', message: 'كل الأصناف تم تصديرها بالفعل، لا يوجد جديد لتصديره' });
   }
   return jsonOutput({ status: 'ok', count: result.count, fileUrl: result.fileUrl, fileName: result.fileName });
+}
+
+function handleGetExportLog(body) {
+  var auth = validateToken(body.email, body.token);
+  if (!auth.valid) return jsonOutput({ status: 'error', message: 'يجب تسجيل الدخول أولاً' });
+
+  var sheet = getReportSheet();
+  var data = sheet.getDataRange().getValues();
+  var rows = [];
+  for (var i = 1; i < data.length; i++) {
+    rows.push({
+      gtin: data[i][0],
+      sn: data[i][1],
+      bn: data[i][2],
+      xd: data[i][3],
+      exportedAt: data[i][4] instanceof Date ? Utilities.formatDate(data[i][4], Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm') : String(data[i][4]),
+      exportedBy: data[i][5],
+      fileName: data[i][6]
+    });
+  }
+  rows.reverse(); // الأحدث أولاً
+  return jsonOutput({ status: 'ok', rows: rows });
 }
 
 // ============ قائمة الشيت (تصدير يدوي بديل من داخل جوجل شيت) ============

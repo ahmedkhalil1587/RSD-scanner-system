@@ -156,6 +156,7 @@
 
     <div class="tabs" id="appTabs">
       <div class="tab active" id="scanTabBtn" onclick="showAppTab('scan')">السكانر</div>
+      <div class="tab" id="exportLogTabBtn" onclick="showAppTab('exportlog')">سجل التصدير</div>
       <div class="tab hidden" id="adminTabBtn" onclick="showAppTab('admin')">لوحة الإدارة</div>
     </div>
 
@@ -209,6 +210,26 @@
         <table>
           <thead><tr><th>الوقت</th><th>GTIN</th><th>SN</th><th>BN</th><th>XD</th><th>الحالة</th></tr></thead>
           <tbody id="logBody"><tr><td colspan="6" class="empty">لسه مفيش أي عملية سكان</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ---- تبويب سجل التصدير ---- -->
+    <div id="exportLogTab" class="hidden">
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:10px;">
+          <h2 style="margin:0;">سجل التصدير لهيئة رصد</h2>
+          <div style="display:flex; gap:10px; align-items:center;">
+            <select id="exportLogFileFilter" onchange="renderExportLog()" style="padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:#0c1512; color:var(--text); font-family:inherit; font-size:13px;">
+              <option value="">كل الملفات</option>
+            </select>
+            <button class="btn-ghost btn-small" onclick="loadExportLog()">تحديث</button>
+          </div>
+        </div>
+        <div id="exportLogSummary" class="hint" style="margin-top:0;"></div>
+        <table>
+          <thead><tr><th>تاريخ التصدير</th><th>GTIN</th><th>SN</th><th>BN</th><th>XD</th><th>صدّره</th><th>اسم الملف</th></tr></thead>
+          <tbody id="exportLogBody"><tr><td colspan="7" class="empty">جارِ التحميل...</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -301,10 +322,13 @@ function showAuthTab(tab) {
 
 function showAppTab(tab) {
   document.getElementById('scanTabBtn').classList.toggle('active', tab === 'scan');
+  document.getElementById('exportLogTabBtn').classList.toggle('active', tab === 'exportlog');
   document.getElementById('adminTabBtn').classList.toggle('active', tab === 'admin');
   document.getElementById('scanTab').classList.toggle('hidden', tab !== 'scan');
+  document.getElementById('exportLogTab').classList.toggle('hidden', tab !== 'exportlog');
   document.getElementById('adminTab').classList.toggle('hidden', tab !== 'admin');
   if (tab === 'admin') loadUsers();
+  if (tab === 'exportlog') loadExportLog();
 }
 
 // ============ تسجيل الدخول / التسجيل / OTP ============
@@ -393,6 +417,46 @@ async function submitChangePassword() {
   } else {
     showMsg('pwMsg','error', res.message);
   }
+}
+
+// ============ سجل التصدير ============
+let exportLogRows = [];
+
+async function loadExportLog() {
+  const res = await apiCall({ action: 'getExportLog', email: session.email, token: session.token });
+  const body = document.getElementById('exportLogBody');
+  if (res.status !== 'ok') {
+    body.innerHTML = '<tr><td colspan="7" class="empty">' + (res.message || 'خطأ') + '</td></tr>';
+    return;
+  }
+  exportLogRows = res.rows;
+
+  const select = document.getElementById('exportLogFileFilter');
+  const currentValue = select.value;
+  const fileNames = [...new Set(exportLogRows.map(r => r.fileName))];
+  select.innerHTML = '<option value="">كل الملفات</option>' +
+    fileNames.map(f => `<option value="${f}">${f}</option>`).join('');
+  select.value = fileNames.includes(currentValue) ? currentValue : '';
+
+  renderExportLog();
+}
+
+function renderExportLog() {
+  const filter = document.getElementById('exportLogFileFilter').value;
+  const body = document.getElementById('exportLogBody');
+  const rows = filter ? exportLogRows.filter(r => r.fileName === filter) : exportLogRows;
+
+  document.getElementById('exportLogSummary').textContent =
+    rows.length === 0 ? 'مفيش أصناف مُصدَّرة لسه' : `إجمالي الأصناف المعروضة: ${rows.length}`;
+
+  if (rows.length === 0) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">مفيش بيانات</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => `<tr>
+    <td>${r.exportedAt}</td><td>${r.gtin}</td><td>${r.sn}</td><td>${r.bn}</td><td>${r.xd}</td>
+    <td>${r.exportedBy}</td><td>${r.fileName}</td>
+  </tr>`).join('');
 }
 
 // ============ لوحة الإدارة ============

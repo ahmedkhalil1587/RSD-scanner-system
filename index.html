@@ -78,6 +78,7 @@
   .brand h1 { margin:0; }
   .brand .brand-sub { font-size:11px; color:var(--text-dim); font-weight:400; margin-top:2px; }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -195,7 +196,7 @@
       <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
           <h2 style="margin:0;">سجل السكان</h2>
-          <button class="btn-accent btn-small" onclick="exportToRegulator()">تصدير للهيئة (الأصناف الجديدة فقط)</button>
+          <button class="btn-accent btn-small" onclick="openExportOptions()">تصدير للهيئة (الأصناف الجديدة فقط)</button>
         </div>
         <div id="exportMsg" class="msg"></div>
         <table>
@@ -214,6 +215,7 @@
             <select id="exportLogFileFilter" onchange="renderExportLog()" style="padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:var(--input-bg); color:var(--text); font-family:inherit; font-size:13px;">
               <option value="">كل الملفات</option>
             </select>
+            <button class="btn-accent btn-small" id="redownloadBtn" onclick="redownloadSelectedFile()" disabled>⬇ إعادة تحميل هذا الملف</button>
             <button class="btn-ghost btn-small" onclick="loadExportLog()">تحديث</button>
           </div>
         </div>
@@ -271,6 +273,30 @@
       <div style="display:flex; gap:10px;">
         <button class="btn-accent" id="saveUrlBtn" onclick="saveUrlSettings()">حفظ</button>
         <button class="btn-ghost" onclick="closeUrlSettings()">إغلاق</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== مودال خيارات التصدير ===================== -->
+  <div id="exportOptionsModal" class="hidden" style="position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:50;">
+    <div class="card" style="max-width:420px; width:90%;">
+      <h2>تصدير للهيئة</h2>
+      <div id="exportOptionsMsg" class="msg"></div>
+      <label style="display:flex; align-items:center; gap:6px; margin-bottom:10px;">
+        <input type="radio" name="exportMode" id="exportModeFull" value="full" checked style="width:auto;">
+        تحميل الملف كامل (ملف واحد)
+      </label>
+      <label style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
+        <input type="radio" name="exportMode" id="exportModeSplit" value="split" style="width:auto;">
+        تقسيم لملفات، بحد أقصى
+      </label>
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:14px; padding-right:26px;">
+        <input type="text" id="splitChunkSize" placeholder="20" style="width:90px; margin-bottom:0;">
+        <span style="font-size:13px; color:var(--text-dim);">صف لكل ملف (هتتحمّل كـ ZIP)</span>
+      </div>
+      <div style="display:flex; gap:10px;">
+        <button class="btn-accent" onclick="confirmExport()">تصدير</button>
+        <button class="btn-ghost" onclick="closeExportOptions()">إلغاء</button>
       </div>
     </div>
   </div>
@@ -462,6 +488,8 @@ function renderExportLog() {
   const body = document.getElementById('exportLogBody');
   const rows = filter ? exportLogRows.filter(r => r.fileName === filter) : exportLogRows;
 
+  document.getElementById('redownloadBtn').disabled = !filter;
+
   document.getElementById('exportLogSummary').textContent =
     rows.length === 0 ? 'مفيش أصناف مُصدَّرة لسه' : `إجمالي الأصناف المعروضة: ${rows.length}`;
 
@@ -473,6 +501,16 @@ function renderExportLog() {
     <td>${r.exportedAt}</td><td>${r.gtin}</td><td>${r.sn}</td><td>${r.bn}</td><td>${r.xd}</td>
     <td>${r.exportedBy}</td><td>${r.fileName}</td>
   </tr>`).join('');
+}
+
+function redownloadSelectedFile() {
+  const filter = document.getElementById('exportLogFileFilter').value;
+  if (!filter) return;
+  const rows = exportLogRows.filter(r => r.fileName === filter);
+  if (rows.length === 0) return;
+  const lines = ['GTIN;SN;BN;XD'];
+  rows.forEach(r => lines.push([r.gtin, r.sn, r.bn, r.xd].join(';')));
+  downloadCsvFile(filter, lines.join('\r\n'));
 }
 
 // ============ لوحة الإدارة ============
@@ -715,15 +753,71 @@ function downloadCsvFile(fileName, content) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-async function exportToRegulator() {
-  clearMsg('exportMsg');
-  const res = await apiCall({ action: 'exportRegulator', email: session.email, token: session.token });
-  if (res.status === 'ok') {
-    downloadCsvFile(res.fileName, res.csvContent);
-    showMsg('exportMsg','ok', `تم تصدير ${res.count} صنف بنجاح، جاري تحميل الملف: ${res.fileName}`);
-  } else {
-    showMsg('exportMsg','error', res.message);
+function openExportOptions() {
+  clearMsg('exportOptionsMsg');
+  document.getElementById('exportModeFull').checked = true;
+  document.getElementById('splitChunkSize').value = '20';
+  document.getElementById('exportOptionsModal').classList.remove('hidden');
+}
+function closeExportOptions() { document.getElementById('exportOptionsModal').classList.add('hidden'); }
+
+async function confirmExport() {
+  const isSplit = document.getElementById('exportModeSplit').checked;
+  let chunkSize = 0;
+  if (isSplit) {
+    chunkSize = parseInt(document.getElementById('splitChunkSize').value, 10);
+    if (!chunkSize || chunkSize < 1) {
+      showMsg('exportOptionsMsg', 'error', 'اكتب عدد صفوف صحيح أكبر من صفر');
+      return;
+    }
   }
+
+  showMsg('exportOptionsMsg', 'ok', 'جاري التصدير...');
+  const res = await apiCall({ action: 'exportRegulator', email: session.email, token: session.token });
+
+  if (res.status !== 'ok') {
+    showMsg('exportOptionsMsg', 'error', res.message);
+    clearMsg('exportMsg');
+    showMsg('exportMsg', 'error', res.message);
+    return;
+  }
+
+  if (!isSplit) {
+    downloadCsvFile(res.fileName, res.csvContent);
+  } else {
+    await downloadSplitZip(res.fileName, res.csvContent, chunkSize);
+  }
+
+  closeExportOptions();
+  clearMsg('exportMsg');
+  showMsg('exportMsg', 'ok', `تم تصدير ${res.count} صنف بنجاح: ${res.fileName}`);
+}
+
+async function downloadSplitZip(originalFileName, csvContent, chunkSize) {
+  const lines = csvContent.split('\r\n');
+  const header = lines[0];
+  const dataLines = lines.slice(1).filter(l => l.trim() !== '');
+
+  const zip = new JSZip();
+  const baseName = originalFileName.replace(/\.csv$/i, '');
+  const totalParts = Math.ceil(dataLines.length / chunkSize);
+
+  for (let i = 0; i < totalParts; i++) {
+    const chunk = dataLines.slice(i * chunkSize, (i + 1) * chunkSize);
+    const partContent = header + '\r\n' + chunk.join('\r\n');
+    const partNum = String(i + 1).padStart(3, '0');
+    zip.file(`${baseName}_part${partNum}.csv`, partContent);
+  }
+
+  const blob = await zip.generateAsync({ type: 'blob' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${baseName}_split.zip`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 document.addEventListener('click', (e) => {

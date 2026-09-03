@@ -280,7 +280,7 @@
   <!-- ===================== مودال خيارات التصدير ===================== -->
   <div id="exportOptionsModal" class="hidden" style="position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:50;">
     <div class="card" style="max-width:420px; width:90%;">
-      <h2>تصدير للهيئة</h2>
+      <h2 id="exportOptionsTitle">تصدير للهيئة</h2>
       <div id="exportOptionsMsg" class="msg"></div>
       <label style="display:flex; align-items:center; gap:6px; margin-bottom:10px;">
         <input type="radio" name="exportMode" id="exportModeFull" value="full" checked style="width:auto;">
@@ -506,11 +506,12 @@ function renderExportLog() {
 function redownloadSelectedFile() {
   const filter = document.getElementById('exportLogFileFilter').value;
   if (!filter) return;
-  const rows = exportLogRows.filter(r => r.fileName === filter);
-  if (rows.length === 0) return;
-  const lines = ['GTIN;SN;BN;XD'];
-  rows.forEach(r => lines.push([r.gtin, r.sn, r.bn, r.xd].join(';')));
-  downloadCsvFile(filter, lines.join('\r\n'));
+  exportModalContext = 'redownload';
+  document.getElementById('exportOptionsTitle').textContent = 'إعادة تحميل: ' + filter;
+  clearMsg('exportOptionsMsg');
+  document.getElementById('exportModeFull').checked = true;
+  document.getElementById('splitChunkSize').value = '20';
+  document.getElementById('exportOptionsModal').classList.remove('hidden');
 }
 
 // ============ لوحة الإدارة ============
@@ -753,7 +754,11 @@ function downloadCsvFile(fileName, content) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+let exportModalContext = 'new'; // 'new' أو 'redownload'
+
 function openExportOptions() {
+  exportModalContext = 'new';
+  document.getElementById('exportOptionsTitle').textContent = 'تصدير للهيئة';
   clearMsg('exportOptionsMsg');
   document.getElementById('exportModeFull').checked = true;
   document.getElementById('splitChunkSize').value = '20';
@@ -770,6 +775,25 @@ async function confirmExport() {
       showMsg('exportOptionsMsg', 'error', 'اكتب عدد صفوف صحيح أكبر من صفر');
       return;
     }
+  }
+
+  if (exportModalContext === 'redownload') {
+    const filter = document.getElementById('exportLogFileFilter').value;
+    const rows = exportLogRows.filter(r => r.fileName === filter);
+    if (rows.length === 0) {
+      showMsg('exportOptionsMsg', 'error', 'مفيش بيانات لهذا الملف');
+      return;
+    }
+    const lines = ['GTIN;SN;BN;XD'];
+    rows.forEach(r => lines.push([r.gtin, r.sn, r.bn, r.xd].join(';')));
+    const csvContent = lines.join('\r\n');
+    if (!isSplit) {
+      downloadCsvFile(filter, csvContent);
+    } else {
+      await downloadSplitZip(filter, csvContent, chunkSize);
+    }
+    closeExportOptions();
+    return;
   }
 
   showMsg('exportOptionsMsg', 'ok', 'جاري التصدير...');

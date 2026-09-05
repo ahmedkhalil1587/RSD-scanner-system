@@ -362,6 +362,12 @@ function performExport(triggeredByEmail) {
   rowsToExport.forEach(function (r) { lines.push([padGtin(r[0]), r[1], r[2], r[3]].join(';')); });
   // بدون سطر فارغ في آخر الملف — لازم يطابق شكل نموذج هيئة رصد الرسمي بالظبط
   var csvContent = lines.join('\r\n').replace(/[\r\n]+$/, '');
+
+  // الصيغة الثانية المقبولة من رصد: تجميع حسب الدفعة (GTIN;QUANTITY;BN;XD)
+  var groupedCsvContent = buildGroupedCsv(rowsToExport.map(function (r) {
+    return { gtin: padGtin(r[0]), bn: r[2], xd: r[3] };
+  }));
+
   var fileName = 'rasd_export_' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd_HHmm') + '.csv';
   var file = DriveApp.createFile(fileName, csvContent, MimeType.CSV);
 
@@ -374,7 +380,30 @@ function performExport(triggeredByEmail) {
     dataSheet.getRange(rowIdx, exportedCol + 1).setValue(now);
   });
 
-  return { count: rowsToExport.length, fileUrl: file.getUrl(), fileName: fileName, csvContent: csvContent };
+  return {
+    count: rowsToExport.length,
+    fileUrl: file.getUrl(),
+    fileName: fileName,
+    csvContent: csvContent,
+    groupedCsvContent: groupedCsvContent
+  };
+}
+
+// يبني صيغة "مجمّع حسب الدفعة" (GTIN;QUANTITY;BN;XD) — كل صنف+دفعة+تاريخ صلاحية يتحسب مرة واحدة مع عدّاد الكمية
+function buildGroupedCsv(items) {
+  var groups = {};
+  var order = [];
+  items.forEach(function (item) {
+    var key = item.gtin + '|' + item.bn + '|' + item.xd;
+    if (!groups[key]) { groups[key] = { gtin: item.gtin, bn: item.bn, xd: item.xd, qty: 0 }; order.push(key); }
+    groups[key].qty++;
+  });
+  var lines = ['GTIN;QUANTITY;BN;XD'];
+  order.forEach(function (key) {
+    var g = groups[key];
+    lines.push([g.gtin, g.qty, g.bn, g.xd].join(';'));
+  });
+  return lines.join('\r\n').replace(/[\r\n]+$/, '');
 }
 
 function handleExportRegulator(body) {
@@ -390,7 +419,8 @@ function handleExportRegulator(body) {
     count: result.count,
     fileUrl: result.fileUrl,
     fileName: result.fileName,
-    csvContent: result.csvContent
+    csvContent: result.csvContent,
+    groupedCsvContent: result.groupedCsvContent
   });
 }
 

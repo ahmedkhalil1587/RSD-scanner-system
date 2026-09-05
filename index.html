@@ -282,6 +282,20 @@
     <div class="card" style="max-width:420px; width:90%;">
       <h2 id="exportOptionsTitle">تصدير للهيئة</h2>
       <div id="exportOptionsMsg" class="msg"></div>
+
+      <label style="font-size:13px; color:var(--text-dim); margin-bottom:6px;">صيغة الملف</label>
+      <label style="display:flex; align-items:center; gap:6px; margin-bottom:10px;">
+        <input type="radio" name="exportFormat" id="exportFormatDetailed" value="detailed" checked style="width:auto;">
+        تفصيلي — سطر لكل رقم تسلسلي (GTIN;SN;BN;XD)
+      </label>
+      <label style="display:flex; align-items:center; gap:6px; margin-bottom:16px;">
+        <input type="radio" name="exportFormat" id="exportFormatGrouped" value="grouped" style="width:auto;">
+        مجمّع حسب الدفعة مع الكمية (GTIN;QUANTITY;BN;XD)
+      </label>
+
+      <div style="border-top:1px solid var(--border); margin-bottom:16px;"></div>
+
+      <label style="font-size:13px; color:var(--text-dim); margin-bottom:6px;">طريقة التحميل</label>
       <label style="display:flex; align-items:center; gap:6px; margin-bottom:10px;">
         <input type="radio" name="exportMode" id="exportModeFull" value="full" checked style="width:auto;">
         تحميل الملف كامل (ملف واحد)
@@ -510,6 +524,7 @@ function redownloadSelectedFile() {
   document.getElementById('exportOptionsTitle').textContent = 'إعادة تحميل: ' + filter;
   clearMsg('exportOptionsMsg');
   document.getElementById('exportModeFull').checked = true;
+  document.getElementById('exportFormatDetailed').checked = true;
   document.getElementById('splitChunkSize').value = '20';
   document.getElementById('exportOptionsModal').classList.remove('hidden');
 }
@@ -614,6 +629,23 @@ function padGtinClient(gtin) {
   let digits = String(gtin || '').replace(/[^0-9]/g, '');
   while (digits.length < 14 && digits.length > 0) digits = '0' + digits;
   return digits;
+}
+
+// يبني صيغة "مجمّع حسب الدفعة" (GTIN;QUANTITY;BN;XD) من قائمة عناصر {gtin,bn,xd}
+function buildGroupedCsvClient(items) {
+  const groups = {};
+  const order = [];
+  items.forEach(item => {
+    const key = item.gtin + '|' + item.bn + '|' + item.xd;
+    if (!groups[key]) { groups[key] = { gtin: item.gtin, bn: item.bn, xd: item.xd, qty: 0 }; order.push(key); }
+    groups[key].qty++;
+  });
+  const lines = ['GTIN;QUANTITY;BN;XD'];
+  order.forEach(key => {
+    const g = groups[key];
+    lines.push([g.gtin, g.qty, g.bn, g.xd].join(';'));
+  });
+  return lines.join('\r\n');
 }
 
 function parseGS1WithSeparator(s) {
@@ -768,6 +800,7 @@ function openExportOptions() {
   document.getElementById('exportOptionsTitle').textContent = 'تصدير للهيئة';
   clearMsg('exportOptionsMsg');
   document.getElementById('exportModeFull').checked = true;
+  document.getElementById('exportFormatDetailed').checked = true;
   document.getElementById('splitChunkSize').value = '20';
   document.getElementById('exportOptionsModal').classList.remove('hidden');
 }
@@ -775,6 +808,7 @@ function closeExportOptions() { document.getElementById('exportOptionsModal').cl
 
 async function confirmExport() {
   const isSplit = document.getElementById('exportModeSplit').checked;
+  const isGrouped = document.getElementById('exportFormatGrouped').checked;
   let chunkSize = 0;
   if (isSplit) {
     chunkSize = parseInt(document.getElementById('splitChunkSize').value, 10);
@@ -791,13 +825,20 @@ async function confirmExport() {
       showMsg('exportOptionsMsg', 'error', 'مفيش بيانات لهذا الملف');
       return;
     }
-    const lines = ['GTIN;SN;BN;XD'];
-    rows.forEach(r => lines.push([padGtinClient(r.gtin), r.sn, r.bn, r.xd].join(';')));
-    const csvContent = lines.join('\r\n');
-    if (!isSplit) {
-      downloadCsvFile(filter, csvContent);
+    let csvContent, outFileName;
+    if (isGrouped) {
+      csvContent = buildGroupedCsvClient(rows.map(r => ({ gtin: padGtinClient(r.gtin), bn: r.bn, xd: r.xd })));
+      outFileName = filter.replace(/\.csv$/i, '') + '_grouped.csv';
     } else {
-      await downloadSplitZip(filter, csvContent, chunkSize);
+      const lines = ['GTIN;SN;BN;XD'];
+      rows.forEach(r => lines.push([padGtinClient(r.gtin), r.sn, r.bn, r.xd].join(';')));
+      csvContent = lines.join('\r\n');
+      outFileName = filter;
+    }
+    if (!isSplit) {
+      downloadCsvFile(outFileName, csvContent);
+    } else {
+      await downloadSplitZip(outFileName, csvContent, chunkSize);
     }
     closeExportOptions();
     return;
@@ -813,10 +854,13 @@ async function confirmExport() {
     return;
   }
 
+  const chosenContent = isGrouped ? res.groupedCsvContent : res.csvContent;
+  const chosenFileName = isGrouped ? res.fileName.replace(/\.csv$/i, '') + '_grouped.csv' : res.fileName;
+
   if (!isSplit) {
-    downloadCsvFile(res.fileName, res.csvContent);
+    downloadCsvFile(chosenFileName, chosenContent);
   } else {
-    await downloadSplitZip(res.fileName, res.csvContent, chunkSize);
+    await downloadSplitZip(chosenFileName, chosenContent, chunkSize);
   }
 
   closeExportOptions();

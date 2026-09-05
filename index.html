@@ -79,6 +79,7 @@
   .brand .brand-sub { font-size:11px; color:var(--text-dim); font-weight:400; margin-top:2px; }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -163,6 +164,7 @@
     <div class="tabs" id="appTabs">
       <div class="tab active" id="scanTabBtn" onclick="showAppTab('scan')">السكانر</div>
       <div class="tab" id="exportLogTabBtn" onclick="showAppTab('exportlog')">سجل التصدير</div>
+      <div class="tab" id="idfTabBtn" onclick="showAppTab('idf')">دليل الأدوية (IDF)</div>
       <div class="tab hidden" id="adminTabBtn" onclick="showAppTab('admin')">لوحة الإدارة</div>
     </div>
 
@@ -224,6 +226,48 @@
           <thead><tr><th>تاريخ التصدير</th><th>GTIN</th><th>SN</th><th>BN</th><th>XD</th><th>صدّره</th><th>اسم الملف</th></tr></thead>
           <tbody id="exportLogBody"><tr><td colspan="7" class="empty">جارِ التحميل...</td></tr></tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- ---- تبويب دليل الأدوية (IDF) ---- -->
+    <div id="idfTab" class="hidden">
+      <div class="card">
+        <h2 style="margin-top:0;">قاعدة بيانات الأدوية (IDF)</h2>
+        <div class="hint" style="margin-top:0;">
+          ارفع ملف الأدوية (IDF) مرة واحدة بس — بيتخزّن في متصفحك أنت بس (مش على جوجل أو أي سيرفر)، وهيفضل محفوظ لحد ما تحدّثه تاني.
+        </div>
+        <div id="idfStatus" class="hint" style="margin-top:10px; font-weight:600;">جاري التحقق من القاعدة المحفوظة...</div>
+        <div style="display:flex; gap:10px; align-items:center; margin-top:14px; flex-wrap:wrap;">
+          <input type="file" id="idfFileInput" accept=".xlsx,.xls,.csv" style="flex:1; min-width:220px;">
+          <button class="btn-accent btn-small" onclick="loadIdfFile()">تحميل / تحديث القاعدة</button>
+          <button class="btn-ghost btn-small" onclick="clearIdfDatabase()">مسح القاعدة المحفوظة</button>
+        </div>
+        <div id="idfLoadMsg" class="msg"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0;">مطابقة الأسماء لملف من رصد</h2>
+        <div class="hint" style="margin-top:0;">
+          ارفع أي ملف فيه عمود GTIN (زي ملف "Notification Result" من رصد)، والنظام هيضيف اسم الصنف جنب كل GTIN تلقائيًا من قاعدة IDF.
+        </div>
+        <div style="display:flex; gap:10px; align-items:center; margin-top:14px; flex-wrap:wrap;">
+          <input type="file" id="matchFileInput" accept=".xlsx,.xls,.csv" style="flex:1; min-width:220px;">
+          <button class="btn-accent btn-small" onclick="matchGtinFile()">مطابقة الأسماء</button>
+        </div>
+        <div id="matchMsg" class="msg"></div>
+        <div id="matchDownloadBtnWrap" class="hidden" style="margin-top:10px;">
+          <button class="btn-accent btn-small" onclick="downloadMatchedResult()">⬇ تحميل النتيجة (Excel)</button>
+        </div>
+      </div>
+
+      <div class="card" id="matchResultCard" style="display:none;">
+        <h2 style="margin-top:0;">النتيجة</h2>
+        <div style="overflow-x:auto;">
+          <table id="matchResultTable">
+            <thead id="matchResultHead"></thead>
+            <tbody id="matchResultBody"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -377,12 +421,15 @@ function showAuthTab(tab) {
 function showAppTab(tab) {
   document.getElementById('scanTabBtn').classList.toggle('active', tab === 'scan');
   document.getElementById('exportLogTabBtn').classList.toggle('active', tab === 'exportlog');
+  document.getElementById('idfTabBtn').classList.toggle('active', tab === 'idf');
   document.getElementById('adminTabBtn').classList.toggle('active', tab === 'admin');
   document.getElementById('scanTab').classList.toggle('hidden', tab !== 'scan');
   document.getElementById('exportLogTab').classList.toggle('hidden', tab !== 'exportlog');
+  document.getElementById('idfTab').classList.toggle('hidden', tab !== 'idf');
   document.getElementById('adminTab').classList.toggle('hidden', tab !== 'admin');
   if (tab === 'admin') loadUsers();
   if (tab === 'exportlog') loadExportLog();
+  if (tab === 'idf') refreshIdfStatus();
 }
 
 // ============ تسجيل الدخول / التسجيل / OTP ============
@@ -645,6 +692,67 @@ function buildGroupedCsvClient(items) {
     const g = groups[key];
     lines.push([g.gtin, g.qty, g.bn, g.xd].join(';'));
   });
+  return lines.join('\r\n').replace(/[\r\n]+$/, '');
+}
+
+// نفس تحقق الباك إند، مستخدم لفحص بيانات إعادة التحميل قبل إعادة بنائها
+function validateItemClient(gtin, sn, bn, xd, requireSn) {
+  const issues = [];
+  const paddedGtin = padGtinClient(gtin);
+  if (!/^\d{14}$/.test(paddedGtin)) issues.push('GTIN غير صحيح (لازم 14 رقم)');
+
+  if (requireSn) {
+    const snStr = String(sn || '').trim();
+    if (!snStr || snStr === '0') issues.push('SN غير صحيح');
+  }
+
+  const bnStr = String(bn || '').trim();
+  if (!bnStr) {
+    issues.push('BN فاضي');
+  } else if (!/^[\x00-\x7F]*$/.test(bnStr)) {
+    issues.push('BN فيه حروف غير مسموحة (عربي/رمز غريب)');
+  }
+
+  const dateMatch = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(xd || ''));
+  if (!dateMatch) {
+    issues.push('تاريخ الصلاحية غير صحيح (لازم DD/MM/YYYY)');
+  } else {
+    const dd = parseInt(dateMatch[1], 10), mm = parseInt(dateMatch[2], 10), yyyy = parseInt(dateMatch[3], 10);
+    const d = new Date(yyyy, mm - 1, dd);
+    if (d.getFullYear() !== yyyy || d.getMonth() !== mm - 1 || d.getDate() !== dd) {
+      issues.push('تاريخ الصلاحية غير حقيقي');
+    }
+  }
+  return issues;
+}
+
+// يفصل الصفوف السليمة عن المشكلة فيها، لأي مصفوفة {gtin,sn,bn,xd}
+function splitCleanAndFlagged(items, requireSn) {
+  const clean = [];
+  const flagged = [];
+  const seenKeys = {};
+  items.forEach((item, idx) => {
+    const gtin = padGtinClient(item.gtin);
+    const issues = validateItemClient(gtin, item.sn, item.bn, item.xd, requireSn);
+    const key = gtin + '|' + (item.sn || '');
+    if (issues.length === 0 && requireSn) {
+      if (seenKeys[key]) issues.push('صنف مكرر (نفس GTIN+SN)');
+      else seenKeys[key] = true;
+    }
+    if (issues.length === 0) {
+      clean.push({ gtin, sn: item.sn, bn: item.bn, xd: item.xd });
+    } else {
+      flagged.push({ gtin, sn: item.sn, bn: item.bn, xd: item.xd, issues: issues.join(' | ') });
+    }
+  });
+  return { clean, flagged };
+}
+
+function buildFlaggedReportCsv(flaggedRows) {
+  const lines = ['GTIN;SN;BN;XD;المشكلة'];
+  flaggedRows.forEach(r => {
+    lines.push([r.gtin, r.sn || '', r.bn || '', r.xd || '', r.issues].join(';'));
+  });
   return lines.join('\r\n');
 }
 
@@ -820,18 +928,26 @@ async function confirmExport() {
 
   if (exportModalContext === 'redownload') {
     const filter = document.getElementById('exportLogFileFilter').value;
-    const rows = exportLogRows.filter(r => r.fileName === filter);
-    if (rows.length === 0) {
+    const rawRows = exportLogRows.filter(r => r.fileName === filter);
+    if (rawRows.length === 0) {
       showMsg('exportOptionsMsg', 'error', 'مفيش بيانات لهذا الملف');
       return;
     }
+    const { clean, flagged } = splitCleanAndFlagged(rawRows, true);
+
+    if (clean.length === 0) {
+      showMsg('exportOptionsMsg', 'error', `كل الأصناف في هذا الملف فيها مشاكل (${flagged.length} صنف)`);
+      downloadCsvFile(filter.replace(/\.csv$/i, '') + '_مشاكل.csv', buildFlaggedReportCsv(flagged));
+      return;
+    }
+
     let csvContent, outFileName;
     if (isGrouped) {
-      csvContent = buildGroupedCsvClient(rows.map(r => ({ gtin: padGtinClient(r.gtin), bn: r.bn, xd: r.xd })));
+      csvContent = buildGroupedCsvClient(clean.map(r => ({ gtin: r.gtin, bn: r.bn, xd: r.xd })));
       outFileName = filter.replace(/\.csv$/i, '') + '_grouped.csv';
     } else {
       const lines = ['GTIN;SN;BN;XD'];
-      rows.forEach(r => lines.push([padGtinClient(r.gtin), r.sn, r.bn, r.xd].join(';')));
+      clean.forEach(r => lines.push([r.gtin, r.sn, r.bn, r.xd].join(';')));
       csvContent = lines.join('\r\n');
       outFileName = filter;
     }
@@ -839,6 +955,10 @@ async function confirmExport() {
       downloadCsvFile(outFileName, csvContent);
     } else {
       await downloadSplitZip(outFileName, csvContent, chunkSize);
+    }
+    if (flagged.length > 0) {
+      downloadCsvFile(filter.replace(/\.csv$/i, '') + '_مشاكل.csv', buildFlaggedReportCsv(flagged));
+      showMsg('exportOptionsMsg', 'ok', `تم التحميل، وفيه ${flagged.length} صنف اتشال ونزّل في ملف "مشاكل" منفصل`);
     }
     closeExportOptions();
     return;
@@ -851,6 +971,9 @@ async function confirmExport() {
     showMsg('exportOptionsMsg', 'error', res.message);
     clearMsg('exportMsg');
     showMsg('exportMsg', 'error', res.message);
+    if (res.flaggedRows && res.flaggedRows.length > 0) {
+      downloadCsvFile('مشاكل_' + Date.now() + '.csv', buildFlaggedReportCsv(res.flaggedRows));
+    }
     return;
   }
 
@@ -863,9 +986,14 @@ async function confirmExport() {
     await downloadSplitZip(chosenFileName, chosenContent, chunkSize);
   }
 
+  if (res.flaggedRows && res.flaggedRows.length > 0) {
+    downloadCsvFile(res.fileName.replace(/\.csv$/i, '') + '_مشاكل.csv', buildFlaggedReportCsv(res.flaggedRows));
+  }
+
   closeExportOptions();
   clearMsg('exportMsg');
-  showMsg('exportMsg', 'ok', `تم تصدير ${res.count} صنف بنجاح: ${res.fileName}`);
+  const flaggedNote = res.flaggedCount > 0 ? ` (وفيه ${res.flaggedCount} صنف اتشال لوجود مشاكل، نزّل في ملف منفصل)` : '';
+  showMsg('exportMsg', 'ok', `تم تصدير ${res.count} صنف بنجاح: ${res.fileName}${flaggedNote}`);
 }
 
 async function downloadSplitZip(originalFileName, csvContent, chunkSize) {
@@ -902,6 +1030,180 @@ document.addEventListener('click', (e) => {
     scanInput.focus();
   }
 });
+
+// ============ دليل الأدوية (IDF) — مطابقة GTIN باسم الصنف ============
+const IDF_STORAGE_KEY = 'rasd_idf_db_v1';
+const IDF_META_KEY = 'rasd_idf_meta_v1';
+let matchedResultRows = null; // آخر نتيجة مطابقة، جاهزة للتحميل
+
+// يدور على عمود بالاسم من قائمة أسماء محتملة (غير حساس لحالة الأحرف والمسافات)
+function findColumnIndex(headerRow, candidates) {
+  const normalized = headerRow.map(h => String(h || '').trim().toLowerCase());
+  for (const cand of candidates) {
+    const idx = normalized.indexOf(cand.toLowerCase());
+    if (idx !== -1) return idx;
+  }
+  return -1;
+}
+
+function readWorkbookSheet(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target.result, { type: 'array' });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '' });
+        resolve(rows);
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = () => reject(new Error('تعذر قراءة الملف'));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function refreshIdfStatus() {
+  const meta = localStorage.getItem(IDF_META_KEY);
+  const statusEl = document.getElementById('idfStatus');
+  if (!meta) {
+    statusEl.textContent = 'مفيش قاعدة بيانات محفوظة دلوقتي — ارفع ملف IDF عشان تفعّل المطابقة.';
+    return;
+  }
+  const { count, updatedAt } = JSON.parse(meta);
+  statusEl.textContent = `✓ قاعدة محمّلة: ${count} صنف — آخر تحديث: ${updatedAt}`;
+}
+
+async function loadIdfFile() {
+  const fileInput = document.getElementById('idfFileInput');
+  const file = fileInput.files[0];
+  clearMsg('idfLoadMsg');
+  if (!file) { showMsg('idfLoadMsg', 'error', 'اختار ملف الأول'); return; }
+
+  showMsg('idfLoadMsg', 'ok', 'جاري القراءة والمعالجة...');
+  try {
+    const rows = await readWorkbookSheet(file);
+    if (rows.length < 2) throw new Error('الملف فاضي');
+
+    const header = rows[0];
+    const codeIdx = findColumnIndex(header, ['code', 'gtin']);
+    const nameIdx = findColumnIndex(header, ['display', 'display name', 'displayname', 'name']);
+    const manufIdx = findColumnIndex(header, ['manufacturer']);
+    const dosageIdx = findColumnIndex(header, ['dosage_form', 'dosage form']);
+    const strengthIdx = findColumnIndex(header, ['strength']);
+
+    if (codeIdx === -1 || nameIdx === -1) {
+      throw new Error('مش لاقي عمود CODE أو DISPLAY في الملف — تأكد من أسماء الأعمدة');
+    }
+
+    const db = {};
+    let count = 0;
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      const gtin = padGtinClient(row[codeIdx]);
+      if (!gtin) continue;
+      db[gtin] = {
+        name: String(row[nameIdx] || '').trim(),
+        manufacturer: manufIdx !== -1 ? String(row[manufIdx] || '').trim() : '',
+        dosageForm: dosageIdx !== -1 ? String(row[dosageIdx] || '').trim() : '',
+        strength: strengthIdx !== -1 ? String(row[strengthIdx] || '').trim() : ''
+      };
+      count++;
+    }
+
+    localStorage.setItem(IDF_STORAGE_KEY, JSON.stringify(db));
+    const updatedAt = new Date().toLocaleString('ar-EG');
+    localStorage.setItem(IDF_META_KEY, JSON.stringify({ count, updatedAt }));
+
+    showMsg('idfLoadMsg', 'ok', `تم تحميل ${count} صنف بنجاح`);
+    refreshIdfStatus();
+    fileInput.value = '';
+  } catch (err) {
+    showMsg('idfLoadMsg', 'error', 'خطأ: ' + err.message);
+  }
+}
+
+function clearIdfDatabase() {
+  localStorage.removeItem(IDF_STORAGE_KEY);
+  localStorage.removeItem(IDF_META_KEY);
+  refreshIdfStatus();
+  clearMsg('idfLoadMsg');
+}
+
+async function matchGtinFile() {
+  const fileInput = document.getElementById('matchFileInput');
+  const file = fileInput.files[0];
+  clearMsg('matchMsg');
+  document.getElementById('matchResultCard').style.display = 'none';
+  document.getElementById('matchDownloadBtnWrap').classList.add('hidden');
+
+  if (!file) { showMsg('matchMsg', 'error', 'اختار ملف الأول'); return; }
+
+  const idfRaw = localStorage.getItem(IDF_STORAGE_KEY);
+  if (!idfRaw) { showMsg('matchMsg', 'error', 'لازم تحمّل قاعدة بيانات IDF الأول من فوق'); return; }
+  const idfDb = JSON.parse(idfRaw);
+
+  showMsg('matchMsg', 'ok', 'جاري المطابقة...');
+  try {
+    const rows = await readWorkbookSheet(file);
+    if (rows.length < 2) throw new Error('الملف فاضي');
+
+    const header = rows[0];
+    const gtinIdx = findColumnIndex(header, ['gtin', 'code']);
+    if (gtinIdx === -1) throw new Error('مش لاقي عمود GTIN في الملف');
+
+    const resultIdx = findColumnIndex(header, ['result']);
+    const descIdx = findColumnIndex(header, ['description']);
+
+    const newHeader = [...header];
+    newHeader.splice(gtinIdx + 1, 0, 'اسم الصنف (من IDF)');
+
+    const outRows = [newHeader];
+    let matchedCount = 0;
+
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      const gtin = padGtinClient(row[gtinIdx]);
+      const info = idfDb[gtin];
+      const name = info ? info.name : '';
+      if (info) matchedCount++;
+      const newRow = [...row];
+      newRow[gtinIdx] = gtin;
+      newRow.splice(gtinIdx + 1, 0, name || '(مش موجود في IDF)');
+      outRows.push(newRow);
+    }
+
+    matchedResultRows = outRows;
+    renderMatchResultTable(outRows, gtinIdx, resultIdx, descIdx);
+    document.getElementById('matchResultCard').style.display = 'block';
+    document.getElementById('matchDownloadBtnWrap').classList.remove('hidden');
+    showMsg('matchMsg', 'ok', `تمت المطابقة: ${matchedCount} من ${outRows.length - 1} صنف اتلاقاله اسم`);
+    fileInput.value = '';
+  } catch (err) {
+    showMsg('matchMsg', 'error', 'خطأ: ' + err.message);
+  }
+}
+
+function renderMatchResultTable(outRows, gtinIdx, resultIdx, descIdx) {
+  const head = document.getElementById('matchResultHead');
+  const body = document.getElementById('matchResultBody');
+  const header = outRows[0];
+
+  head.innerHTML = '<tr>' + header.map(h => `<th>${h}</th>`).join('') + '</tr>';
+
+  body.innerHTML = outRows.slice(1).map(row => {
+    const isFailed = resultIdx !== -1 && String(row[resultIdx + (resultIdx > gtinIdx ? 1 : 0)] || '') !== '00000';
+    const rowStyle = isFailed ? ' style="background:rgba(217,105,95,0.08);"' : '';
+    return `<tr${rowStyle}>` + row.map(cell => `<td>${cell}</td>`).join('') + '</tr>';
+  }).join('');
+}
+
+function downloadMatchedResult() {
+  if (!matchedResultRows) return;
+  const ws = XLSX.utils.aoa_to_sheet(matchedResultRows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'النتيجة');
+  XLSX.writeFile(wb, 'rasd_matched_' + Date.now() + '.xlsx');
+}
 </script>
 </body>
 </html>

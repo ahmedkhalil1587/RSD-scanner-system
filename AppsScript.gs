@@ -340,32 +340,86 @@ function handleAdminToggleStatus(body) {
 }
 
 // ============ التصدير لهيئة رصد (مرة واحدة فقط لكل صنف) ============
+// يتحقق من صحة صنف واحد ويرجّع قائمة بالمشاكل (فاضية = سليم)
+function validateItem(gtin, sn, bn, xd, requireSn) {
+  var issues = [];
+  var paddedGtin = padGtin(gtin);
+  if (!/^\d{14}$/.test(paddedGtin)) issues.push('GTIN غير صحيح (لازم 14 رقم)');
+
+  if (requireSn) {
+    var snStr = String(sn || '').trim();
+    if (!snStr || snStr === '0') issues.push('SN غير صحيح');
+  }
+
+  var bnStr = String(bn || '').trim();
+  if (!bnStr) {
+    issues.push('BN فاضي');
+  } else if (!/^[\x00-\x7F]*$/.test(bnStr)) {
+    issues.push('BN فيه حروف غير مسموحة (عربي/رمز غريب)');
+  }
+
+  var dateMatch = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(xd || ''));
+  if (!dateMatch) {
+    issues.push('تاريخ الصلاحية غير صحيح (لازم DD/MM/YYYY)');
+  } else {
+    var dd = parseInt(dateMatch[1], 10), mm = parseInt(dateMatch[2], 10), yyyy = parseInt(dateMatch[3], 10);
+    var d = new Date(yyyy, mm - 1, dd);
+    if (d.getFullYear() !== yyyy || d.getMonth() !== mm - 1 || d.getDate() !== dd) {
+      issues.push('تاريخ الصلاحية غير حقيقي');
+    }
+  }
+  return issues;
+}
+
 function performExport(triggeredByEmail) {
   var dataSheet = getDataSheet();
   var values = dataSheet.getDataRange().getValues();
-  if (values.length < 2) return { count: 0 };
+  if (values.length < 2) return { count: 0, flaggedCount: 0, flaggedRows: [] };
 
   var header = values[0];
   var exportedCol = header.indexOf('Exported');
-  var rowsToExport = [];
-  var rowIndexes = [];
+  var cleanRows = [];
+  var cleanRowIndexes = [];
+  var flaggedRows = [];
+  var seenKeys = {};
 
   for (var i = 1; i < values.length; i++) {
-    if (!values[i][exportedCol]) {
-      rowsToExport.push(values[i]);
-      rowIndexes.push(i + 1);
+    if (values[i][exportedCol]) continue; // اتصدّر قبل كده، تخطاه
+    var gtin = padGtin(values[i][0]);
+    var sn = values[i][1];
+    var bn = values[i][2];
+    var xd = values[i][3];
+    var issues = validateItem(gtin, sn, bn, xd, true);
+
+    var key = gtin + '|' + sn;
+    if (issues.length === 0) {
+      if (seenKeys[key]) {
+        issues.push('صنف مكرر (نفس GTIN+SN سبق في السطر ' + seenKeys[key] + ')');
+      } else {
+        seenKeys[key] = i + 1;
+      }
+    }
+
+    if (issues.length === 0) {
+      cleanRows.push([gtin, sn, bn, xd]);
+      cleanRowIndexes.push(i + 1);
+    } else {
+      flaggedRows.push({ row: i + 1, gtin: gtin, sn: sn, bn: bn, xd: xd, issues: issues.join(' | ') });
     }
   }
-  if (rowsToExport.length === 0) return { count: 0 };
+
+  if (cleanRows.length === 0) {
+    return { count: 0, flaggedCount: flaggedRows.length, flaggedRows: flaggedRows };
+  }
 
   var lines = ['GTIN;SN;BN;XD'];
-  rowsToExport.forEach(function (r) { lines.push([padGtin(r[0]), r[1], r[2], r[3]].join(';')); });
+  cleanRows.forEach(function (r) { lines.push(r.join(';')); });
   // بدون سطر فارغ في آخر الملف — لازم يطابق شكل نموذج هيئة رصد الرسمي بالظبط
   var csvContent = lines.join('\r\n').replace(/[\r\n]+$/, '');
 
   // الصيغة الثانية المقبولة من رصد: تجميع حسب الدفعة (GTIN;QUANTITY;BN;XD)
-  var groupedCsvContent = buildGroupedCsv(rowsToExport.map(function (r) {
-    return { gtin: padGtin(r[0]), bn: r[2], xd: r[3] };
+  var groupedCsvContent = buildGroupedCsv(cleanRows.map(function (r) {
+    return { gtin: r[0], bn: r[2], xd: r[3] };
   }));
 
   var fileName = 'rasd_export_' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd_HHmm') + '.csv';
@@ -373,15 +427,17 @@ function performExport(triggeredByEmail) {
 
   var now = new Date();
   var reportSheet = getReportSheet();
-  rowsToExport.forEach(function (r) {
-    reportSheet.appendRow([padGtin(r[0]), r[1], r[2], r[3], now, triggeredByEmail || '-', fileName]);
+  cleanRows.forEach(function (r) {
+    reportSheet.appendRow([r[0], r[1], r[2], r[3], now, triggeredByEmail || '-', fileName]);
   });
-  rowIndexes.forEach(function (rowIdx) {
+  cleanRowIndexes.forEach(function (rowIdx) {
     dataSheet.getRange(rowIdx, exportedCol + 1).setValue(now);
   });
 
   return {
-    count: rowsToExport.length,
+    count: cleanRows.length,
+    flaggedCount: flaggedRows.length,
+    flaggedRows: flaggedRows,
     fileUrl: file.getUrl(),
     fileName: fileName,
     csvContent: csvContent,
@@ -411,12 +467,23 @@ function handleExportRegulator(body) {
   if (!auth.valid) return jsonOutput({ status: 'error', message: 'يجب تسجيل الدخول أولاً' });
 
   var result = performExport(body.email);
-  if (result.count === 0) {
+
+  if (result.count === 0 && result.flaggedCount === 0) {
     return jsonOutput({ status: 'error', message: 'كل الأصناف تم تصديرها بالفعل، لا يوجد جديد لتصديره' });
+  }
+  if (result.count === 0 && result.flaggedCount > 0) {
+    return jsonOutput({
+      status: 'error',
+      message: 'كل الأصناف الجديدة فيها مشاكل ولازم تتصلح في الشيت الأول (' + result.flaggedCount + ' صنف)',
+      flaggedCount: result.flaggedCount,
+      flaggedRows: result.flaggedRows
+    });
   }
   return jsonOutput({
     status: 'ok',
     count: result.count,
+    flaggedCount: result.flaggedCount,
+    flaggedRows: result.flaggedRows,
     fileUrl: result.fileUrl,
     fileName: result.fileName,
     csvContent: result.csvContent,
@@ -456,15 +523,24 @@ function onOpen() {
 
 function exportRegulatorCsvFromMenu() {
   var result = performExport(Session.getActiveUser().getEmail() || 'sheet-menu');
-  if (result.count === 0) {
+  if (result.count === 0 && (!result.flaggedCount || result.flaggedCount === 0)) {
     SpreadsheetApp.getUi().alert('كل الأصناف تم تصديرها بالفعل، مفيش أصناف جديدة.');
     return;
   }
-  SpreadsheetApp.getUi().alert(
-    'تم تصدير ' + result.count + ' صنف بنجاح:\n' + result.fileName +
+  if (result.count === 0 && result.flaggedCount > 0) {
+    SpreadsheetApp.getUi().alert(
+      'كل الأصناف الجديدة فيها مشاكل (' + result.flaggedCount + ' صنف) ولازم تتصلح في الشيت الأول.\n' +
+      'راجع عمود GTIN/SN/BN/XD للصفوف الجديدة، أو استخدم صفحة السكانر لمعاينة تفاصيل المشاكل.'
+    );
+    return;
+  }
+  var msg = 'تم تصدير ' + result.count + ' صنف بنجاح:\n' + result.fileName +
     '\n\nهتلاقيه في Google Drive (My Drive) وجاهز يترفع لهيئة رصد.\n' +
-    'التفاصيل مسجلة كمان في شيت "' + REPORT_SHEET_NAME + '".'
-  );
+    'التفاصيل مسجلة كمان في شيت "' + REPORT_SHEET_NAME + '".';
+  if (result.flaggedCount > 0) {
+    msg += '\n\nملاحظة: فيه ' + result.flaggedCount + ' صنف اتشال من التصدير لوجود مشاكل فيهم، وهيفضلوا في الشيت لحد ما تصلحهم.';
+  }
+  SpreadsheetApp.getUi().alert(msg);
 }
 
 // ============ إعداد حساب الأدمن (يتشغّل مرة واحدة يدويًا من محرر الأكواد) ============

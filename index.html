@@ -1073,6 +1073,16 @@ function refreshIdfStatus() {
   statusEl.textContent = `✓ قاعدة محمّلة: ${count} صنف — آخر تحديث: ${updatedAt}`;
 }
 
+// يدور على كل الأعمدة اللي شكلها GTIN أو GTIN1..GTIN5 أو CODE
+function findAllGtinColumns(headerRow) {
+  const indices = [];
+  headerRow.forEach((h, idx) => {
+    const norm = String(h || '').trim().toLowerCase();
+    if (norm === 'gtin' || norm === 'code' || /^gtin\d+$/.test(norm)) indices.push(idx);
+  });
+  return indices;
+}
+
 async function loadIdfFile() {
   const fileInput = document.getElementById('idfFileInput');
   const file = fileInput.files[0];
@@ -1085,29 +1095,34 @@ async function loadIdfFile() {
     if (rows.length < 2) throw new Error('الملف فاضي');
 
     const header = rows[0];
-    const codeIdx = findColumnIndex(header, ['code', 'gtin']);
-    const nameIdx = findColumnIndex(header, ['display', 'display name', 'displayname', 'name']);
+    const gtinCols = findAllGtinColumns(header);
+    const nameIdx = findColumnIndex(header, ['display', 'display name', 'displayname', 'name', 'trade name', 'tradename']);
     const manufIdx = findColumnIndex(header, ['manufacturer']);
     const dosageIdx = findColumnIndex(header, ['dosage_form', 'dosage form']);
     const strengthIdx = findColumnIndex(header, ['strength']);
 
-    if (codeIdx === -1 || nameIdx === -1) {
-      throw new Error('مش لاقي عمود CODE أو DISPLAY في الملف — تأكد من أسماء الأعمدة');
+    if (gtinCols.length === 0 || nameIdx === -1) {
+      throw new Error('مش لاقي عمود GTIN/CODE أو عمود الاسم (Display/Trade Name) في الملف');
     }
 
     const db = {};
     let count = 0;
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
-      const gtin = padGtinClient(row[codeIdx]);
-      if (!gtin) continue;
-      db[gtin] = {
-        name: String(row[nameIdx] || '').trim(),
+      const name = String(row[nameIdx] || '').trim();
+      const info = {
+        name,
         manufacturer: manufIdx !== -1 ? String(row[manufIdx] || '').trim() : '',
         dosageForm: dosageIdx !== -1 ? String(row[dosageIdx] || '').trim() : '',
         strength: strengthIdx !== -1 ? String(row[strengthIdx] || '').trim() : ''
       };
-      count++;
+      // كل أعمدة الـGTIN في نفس الصف بتشاور على نفس الصنف/الاسم
+      gtinCols.forEach(colIdx => {
+        const gtin = padGtinClient(row[colIdx]);
+        if (!gtin) return;
+        if (!db[gtin]) count++;
+        db[gtin] = info;
+      });
     }
 
     localStorage.setItem(IDF_STORAGE_KEY, JSON.stringify(db));

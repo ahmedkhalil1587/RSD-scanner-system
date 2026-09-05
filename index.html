@@ -165,6 +165,7 @@
       <div class="tab active" id="scanTabBtn" onclick="showAppTab('scan')">السكانر</div>
       <div class="tab" id="exportLogTabBtn" onclick="showAppTab('exportlog')">سجل التصدير</div>
       <div class="tab" id="idfTabBtn" onclick="showAppTab('idf')">دليل الأدوية (IDF)</div>
+      <div class="tab" id="mergeTabBtn" onclick="showAppTab('merge')">دمج الملفات</div>
       <div class="tab hidden" id="adminTabBtn" onclick="showAppTab('admin')">لوحة الإدارة</div>
     </div>
 
@@ -266,6 +267,39 @@
           <table id="matchResultTable">
             <thead id="matchResultHead"></thead>
             <tbody id="matchResultBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- تبويب دمج الملفات ---- -->
+    <div id="mergeTab" class="hidden">
+      <div class="card">
+        <h2 style="margin-top:0;">دمج ملفات Excel</h2>
+        <div class="hint" style="margin-top:0;">
+          ارفع أي عدد ملفات (ردود رصد، تقارير مشاكل، أو أي ملف إكسيل) طالما نفس الأعمدة موجودة فيهم (حتى لو ترتيبها مختلف)، والأداة هتدمجهم في ملف واحد. كل حاجة بتتم في متصفحك، مفيش رفع لأي سيرفر.
+        </div>
+        <div style="margin-top:14px;">
+          <input type="file" id="mergeFileInput" accept=".xlsx,.xls,.csv" multiple style="width:100%;">
+        </div>
+        <label style="display:flex; align-items:center; gap:6px; margin-top:12px;">
+          <input type="checkbox" id="mergeDedupe" style="width:auto;">
+          احذف الصفوف المكررة بالكامل (لو نفس الصف اتكرر في أكتر من ملف)
+        </label>
+        <button class="btn-accent btn-small" style="margin-top:14px;" onclick="mergeExcelFiles()">دمج الملفات</button>
+        <div id="mergeMsg" class="msg"></div>
+        <div id="mergeDownloadBtnWrap" class="hidden" style="margin-top:10px;">
+          <button class="btn-accent btn-small" onclick="downloadMergedResult()">⬇ تحميل الملف المدمج (Excel)</button>
+        </div>
+      </div>
+
+      <div class="card" id="mergeResultCard" style="display:none;">
+        <h2 style="margin-top:0;">معاينة النتيجة</h2>
+        <div id="mergeSummary" class="hint" style="margin-top:0;"></div>
+        <div style="overflow-x:auto;">
+          <table id="mergeResultTable">
+            <thead id="mergeResultHead"></thead>
+            <tbody id="mergeResultBody"></tbody>
           </table>
         </div>
       </div>
@@ -422,10 +456,12 @@ function showAppTab(tab) {
   document.getElementById('scanTabBtn').classList.toggle('active', tab === 'scan');
   document.getElementById('exportLogTabBtn').classList.toggle('active', tab === 'exportlog');
   document.getElementById('idfTabBtn').classList.toggle('active', tab === 'idf');
+  document.getElementById('mergeTabBtn').classList.toggle('active', tab === 'merge');
   document.getElementById('adminTabBtn').classList.toggle('active', tab === 'admin');
   document.getElementById('scanTab').classList.toggle('hidden', tab !== 'scan');
   document.getElementById('exportLogTab').classList.toggle('hidden', tab !== 'exportlog');
   document.getElementById('idfTab').classList.toggle('hidden', tab !== 'idf');
+  document.getElementById('mergeTab').classList.toggle('hidden', tab !== 'merge');
   document.getElementById('adminTab').classList.toggle('hidden', tab !== 'admin');
   if (tab === 'admin') loadUsers();
   if (tab === 'exportlog') loadExportLog();
@@ -1218,6 +1254,103 @@ function downloadMatchedResult() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'النتيجة');
   XLSX.writeFile(wb, 'rasd_matched_' + Date.now() + '.xlsx');
+}
+
+// ============ دمج ملفات Excel ============
+let mergedResultRows = null;
+
+async function mergeExcelFiles() {
+  const fileInput = document.getElementById('mergeFileInput');
+  const files = Array.from(fileInput.files);
+  clearMsg('mergeMsg');
+  document.getElementById('mergeResultCard').style.display = 'none';
+  document.getElementById('mergeDownloadBtnWrap').classList.add('hidden');
+
+  if (files.length < 2) { showMsg('mergeMsg', 'error', 'اختار ملفين على الأقل'); return; }
+
+  showMsg('mergeMsg', 'ok', 'جاري القراءة والدمج...');
+  try {
+    const allFilesData = [];
+    for (const file of files) {
+      const rows = await readWorkbookSheet(file);
+      if (rows.length < 1) continue;
+      allFilesData.push({ name: file.name, header: rows[0], rows: rows.slice(1) });
+    }
+    if (allFilesData.length === 0) throw new Error('كل الملفات فاضية');
+
+    // بناء هيدر موحّد = اتحاد كل الأعمدة من كل الملفات، بترتيب أول ظهور
+    const canonical = [];
+    const canonicalNorm = [];
+    allFilesData.forEach(f => {
+      f.header.forEach(h => {
+        const norm = String(h || '').trim().toLowerCase();
+        if (norm && !canonicalNorm.includes(norm)) {
+          canonicalNorm.push(norm);
+          canonical.push(String(h || '').trim());
+        }
+      });
+    });
+
+    const dedupe = document.getElementById('mergeDedupe').checked;
+    const mergedRows = [canonical];
+    const seenRowKeys = new Set();
+    const perFileCounts = [];
+
+    allFilesData.forEach(f => {
+      const colMap = f.header.map(h => canonicalNorm.indexOf(String(h || '').trim().toLowerCase()));
+      let count = 0;
+      f.rows.forEach(row => {
+        const newRow = new Array(canonical.length).fill('');
+        row.forEach((val, idx) => {
+          const target = colMap[idx];
+          if (target !== undefined && target !== -1) newRow[target] = val;
+        });
+        const rowKey = newRow.join('|');
+        if (dedupe && seenRowKeys.has(rowKey)) return;
+        seenRowKeys.add(rowKey);
+        mergedRows.push(newRow);
+        count++;
+      });
+      perFileCounts.push(`${f.name}: ${count} صف`);
+    });
+
+    mergedResultRows = mergedRows;
+    renderMergeResultTable(mergedRows);
+    document.getElementById('mergeResultCard').style.display = 'block';
+    document.getElementById('mergeDownloadBtnWrap').classList.remove('hidden');
+    document.getElementById('mergeSummary').textContent =
+      `إجمالي الصفوف بعد الدمج: ${mergedRows.length - 1} — ${perFileCounts.join(' | ')}`;
+    showMsg('mergeMsg', 'ok', `تم دمج ${allFilesData.length} ملف بنجاح`);
+    fileInput.value = '';
+  } catch (err) {
+    showMsg('mergeMsg', 'error', 'خطأ: ' + err.message);
+  }
+}
+
+function renderMergeResultTable(mergedRows) {
+  const head = document.getElementById('mergeResultHead');
+  const body = document.getElementById('mergeResultBody');
+  const header = mergedRows[0];
+  head.innerHTML = '<tr>' + header.map(h => `<th>${h}</th>`).join('') + '</tr>';
+
+  const PREVIEW_LIMIT = 200;
+  const previewRows = mergedRows.slice(1, PREVIEW_LIMIT + 1);
+  body.innerHTML = previewRows.map(row => '<tr>' + row.map(c => `<td>${c}</td>`).join('') + '</tr>').join('');
+
+  const remaining = mergedRows.length - 1 - previewRows.length;
+  if (remaining > 0) {
+    body.innerHTML += `<tr><td colspan="${header.length}" class="empty">
+      ... وباقي ${remaining} صف موجودين في الملف اللي هيتحمّل، بس مش معروضين هنا لتوفير الأداء
+    </td></tr>`;
+  }
+}
+
+function downloadMergedResult() {
+  if (!mergedResultRows) return;
+  const ws = XLSX.utils.aoa_to_sheet(mergedResultRows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'مدمج');
+  XLSX.writeFile(wb, 'merged_' + Date.now() + '.xlsx');
 }
 </script>
 </body>

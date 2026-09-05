@@ -609,6 +609,13 @@ const FIXED_LEN_FULL = {
 
 function stripSymbologyId(str) { return str.replace(/^\][A-Za-z0-9]{1,2}/, ''); }
 
+// يضمن إن GTIN يفضل 14 رقم بالظبط حتى لو جاله بدون الصفر البادئ من أي مصدر
+function padGtinClient(gtin) {
+  let digits = String(gtin || '').replace(/[^0-9]/g, '');
+  while (digits.length < 14 && digits.length > 0) digits = '0' + digits;
+  return digits;
+}
+
 function parseGS1WithSeparator(s) {
   const GS = String.fromCharCode(29);
   const out = {}; let i = 0;
@@ -785,7 +792,7 @@ async function confirmExport() {
       return;
     }
     const lines = ['GTIN;SN;BN;XD'];
-    rows.forEach(r => lines.push([r.gtin, r.sn, r.bn, r.xd].join(';')));
+    rows.forEach(r => lines.push([padGtinClient(r.gtin), r.sn, r.bn, r.xd].join(';')));
     const csvContent = lines.join('\r\n');
     if (!isSplit) {
       downloadCsvFile(filter, csvContent);

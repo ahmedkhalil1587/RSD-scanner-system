@@ -88,12 +88,24 @@ function getDataSheet() {
   if (sheet.getLastRow() === 0) {
     sheet.appendRow(['GTIN', 'SN', 'BN', 'XD', 'ScannedBy', 'ScannedAt', 'Exported']);
   }
+  // فرض تنسيق "نص" على الأعمدة دي عشان جوجل شيت مايشيلش الأصفار البادئة
+  // أو يحوّل تاريخ الصلاحية لصيغة تانية غير DD/MM/YYYY
+  sheet.getRange('A:D').setNumberFormat('@');
   return sheet;
 }
 
+// يضمن إن GTIN يفضل 14 رقم بالظبط حتى لو جوجل شيت شال صفر بادئ من بيانات قديمة
+function padGtin(gtin) {
+  var digits = String(gtin || '').replace(/[^0-9]/g, '');
+  while (digits.length < 14 && digits.length > 0) digits = '0' + digits;
+  return digits;
+}
+
 function getReportSheet() {
-  return getOrCreateSheet(REPORT_SHEET_NAME,
+  var sheet = getOrCreateSheet(REPORT_SHEET_NAME,
     ['GTIN', 'SN', 'BN', 'XD', 'ExportedAt', 'ExportedBy', 'FileName']);
+  sheet.getRange('A:D').setNumberFormat('@');
+  return sheet;
 }
 
 function findUserRow(email) {
@@ -269,7 +281,8 @@ function handleScan(body) {
     return jsonOutput({ status: 'error', message: 'بيانات ناقصة (GTIN/SN/BN/XD)' });
   }
   var sheet = getDataSheet();
-  sheet.appendRow([body.gtin, body.sn, body.bn, body.xd, body.email, new Date(), '']);
+  var gtin = padGtin(body.gtin);
+  sheet.appendRow([gtin, body.sn, body.bn, body.xd, body.email, new Date(), '']);
   return jsonOutput({ status: 'ok' });
 }
 
@@ -346,21 +359,22 @@ function performExport(triggeredByEmail) {
   if (rowsToExport.length === 0) return { count: 0 };
 
   var lines = ['GTIN;SN;BN;XD'];
-  rowsToExport.forEach(function (r) { lines.push([r[0], r[1], r[2], r[3]].join(';')); });
-  var csvContent = lines.join('\r\n');
+  rowsToExport.forEach(function (r) { lines.push([padGtin(r[0]), r[1], r[2], r[3]].join(';')); });
+  // بدون سطر فارغ في آخر الملف — لازم يطابق شكل نموذج هيئة رصد الرسمي بالظبط
+  var csvContent = lines.join('\r\n').replace(/[\r\n]+$/, '');
   var fileName = 'rasd_export_' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd_HHmm') + '.csv';
   var file = DriveApp.createFile(fileName, csvContent, MimeType.CSV);
 
   var now = new Date();
   var reportSheet = getReportSheet();
   rowsToExport.forEach(function (r) {
-    reportSheet.appendRow([r[0], r[1], r[2], r[3], now, triggeredByEmail || '-', fileName]);
+    reportSheet.appendRow([padGtin(r[0]), r[1], r[2], r[3], now, triggeredByEmail || '-', fileName]);
   });
   rowIndexes.forEach(function (rowIdx) {
     dataSheet.getRange(rowIdx, exportedCol + 1).setValue(now);
   });
 
-  return { count: rowsToExport.length, fileUrl: file.getUrl(), fileName: fileName };
+  return { count: rowsToExport.length, fileUrl: file.getUrl(), fileName: fileName, csvContent: csvContent };
 }
 
 function handleExportRegulator(body) {
@@ -371,7 +385,13 @@ function handleExportRegulator(body) {
   if (result.count === 0) {
     return jsonOutput({ status: 'error', message: 'كل الأصناف تم تصديرها بالفعل، لا يوجد جديد لتصديره' });
   }
-  return jsonOutput({ status: 'ok', count: result.count, fileUrl: result.fileUrl, fileName: result.fileName });
+  return jsonOutput({
+    status: 'ok',
+    count: result.count,
+    fileUrl: result.fileUrl,
+    fileName: result.fileName,
+    csvContent: result.csvContent
+  });
 }
 
 function handleGetExportLog(body) {
@@ -383,7 +403,7 @@ function handleGetExportLog(body) {
   var rows = [];
   for (var i = 1; i < data.length; i++) {
     rows.push({
-      gtin: data[i][0],
+      gtin: padGtin(data[i][0]),
       sn: data[i][1],
       bn: data[i][2],
       xd: data[i][3],

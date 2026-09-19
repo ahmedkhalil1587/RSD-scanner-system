@@ -857,8 +857,8 @@ function yymmddToDMY(yymmdd) {
   if (!yymmdd || yymmdd.length !== 6 || !/^\d{6}$/.test(yymmdd)) return '';
   const yy = yymmdd.substr(0,2), mm = yymmdd.substr(2,2); let dd = yymmdd.substr(4,2);
   const year = (parseInt(yy,10) >= 70 ? '19' : '20') + yy;
-  // يوم "00" معناه يوم غير محدد على العلبة — رصد بيعتبره أول يوم في الشهر
-  if (dd === '00') { dd = '01'; }
+  // معيار GS1 الرسمي: يوم "00" (غير موجود فعليًا على العلبة، وغير هذا الاختلاف الحالي) يعني آخر يوم في الشهر
+  if (dd === '00') { const lastDay = new Date(parseInt(year,10), parseInt(mm,10), 0).getDate(); dd = String(lastDay).padStart(2,'0'); }
   return `${dd}/${mm}/${year}`;
 }
 

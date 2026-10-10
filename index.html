@@ -311,7 +311,7 @@
       <div class="card">
         <h2 style="margin-top:0;">مطابقة المخزون مع رصد</h2>
         <div class="hint" style="margin-top:0;">
-          ارفع ملف المخزون الحالي عندك على نظام Advac، وملف "عدد الأدوية" (Drug Count) اللي بتصدّره من رصد. الأداة هتطلع لك كل الأصناف اللي عندها رصيد <b>Active</b> في رصد بس مش موجودة خالص عندك في Advac (أرصدة وهمية/قديمة محتاجة تصحيح). مفيش أي بيانات بتتحفظ — الملفين بيترفعوا ويتقروا في المتصفح بس في كل مرة، ومفيش تخزين على أي سيرفر أو جوجل شيت.
+          ارفع ملف المخزون الحالي عندك على نظام Advac، وملف "عدد الأدوية" (Drug Count) اللي بتصدّره من رصد. الأداة هتقارن كل صنف بالـGTIN وتطلع لك حالتين: (1) أصناف عندها رصيد <b>Active</b> في رصد ومش موجودة خالص عندك في Advac، و(2) أصناف موجودة في الاتنين بس الكمية في Advac أقل من إجمالي الـActive في رصد — وفي الحالة دي بتطلع لك الفرق بالظبط (موزّع على الدفعات الأقرب لانتهاء الصلاحية الأول). مفيش أي بيانات بتتحفظ — الملفين بيترفعوا ويتقروا في المتصفح بس في كل مرة، ومفيش تخزين على أي سيرفر أو جوجل شيت.
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px;" class="recon-grid">
           <div>
@@ -1530,39 +1530,68 @@ async function runStockReconciliation() {
     const found = findRasdActiveSheet(rasdData);
     if (!found) throw new Error('مش لاقي عمود GTIN وعمود Active في ملف رصد (اتأكد إنه ملف "عدد الأدوية - Drug Count")');
 
-    const phantom = [];
+    // نجمع كل دفعات رصد (البتشات) حسب الـGTIN عشان نقدر نحسب الإجمالي الكلي لكل صنف
+    const rasdByGtin = {};
+    const gtinOrder = [];
     for (let i = 1; i < found.rows.length; i++) {
       const row = found.rows[i];
       const gtin = padGtinClient(row[found.gtinIdx]);
       if (!gtin) continue;
       const activeQty = parseFloat(String(row[found.activeIdx] || '0').replace(/,/g, '')) || 0;
-      if (activeQty <= 0) continue; // مفيش رصيد نشط أصلًا، مش محتاج تصحيح
-      const advacQty = advacQtyMap[gtin] || 0;
-      if (advacQty > 0) continue; // موجود عند المستخدم في Advac، مش شبح
-
-      phantom.push({
-        gtin,
+      if (activeQty <= 0) continue; // مفيش رصيد نشط أصلًا على الدفعة دي، مش محتاجة تصحيح
+      if (!rasdByGtin[gtin]) { rasdByGtin[gtin] = []; gtinOrder.push(gtin); }
+      rasdByGtin[gtin].push({
         name: found.nameIdx !== -1 ? String(row[found.nameIdx] || '').trim() : '',
         bn: found.bnIdx !== -1 ? String(row[found.bnIdx] || '').trim() : '',
         xd: found.xdIdx !== -1 ? normalizeDateToDMY(row[found.xdIdx]) : '',
+        xdSort: found.xdIdx !== -1 ? dmyToSortableDate(normalizeDateToDMY(row[found.xdIdx])) : 0,
         active: activeQty
       });
     }
 
-    reconPhantomItems = phantom;
-    renderReconResultTable(phantom);
+    // 3) لكل GTIN: نقارن إجمالي الكمية النشطة في رصد مع الكمية الموجودة فعليًا في Advac
+    //    - لو مش موجود خالص في Advac => "مفقود بالكامل" وكل الدفعات بتتحسب
+    //    - لو موجود بس الكمية أقل => "كمية ناقصة" وبنوزّع الفرق على الدفعات (الأقرب لانتهاء الصلاحية الأول، باعتبارها الأرجح تكون قديمة/منتهية الفاعلية)
+    const correctionItems = [];
+    gtinOrder.forEach(gtin => {
+      const batches = rasdByGtin[gtin];
+      const totalActive = batches.reduce((s, b) => s + b.active, 0);
+      const advacQty = advacQtyMap[gtin] || 0;
+      if (advacQty >= totalActive) return; // مطابق أو Advac عنده أكتر، مفيش حاجة تتصحح
+
+      const diffTotal = totalActive - advacQty;
+      const type = advacQty === 0 ? 'missing' : 'partial';
+      const sortedBatches = [...batches].sort((a, b) => a.xdSort - b.xdSort);
+
+      let remaining = diffTotal;
+      sortedBatches.forEach(b => {
+        if (remaining <= 0) return;
+        const take = Math.min(remaining, b.active);
+        if (take <= 0) return;
+        remaining -= take;
+        correctionItems.push({
+          gtin, name: b.name, bn: b.bn, xd: b.xd, qty: take,
+          type, advacQty, totalActive
+        });
+      });
+    });
+
+    reconPhantomItems = correctionItems;
+    renderReconResultTable(correctionItems);
     document.getElementById('reconResultCard').style.display = 'block';
 
+    const missingGtins = new Set(correctionItems.filter(it => it.type === 'missing').map(it => it.gtin)).size;
+    const partialGtins = new Set(correctionItems.filter(it => it.type === 'partial').map(it => it.gtin)).size;
     const totalRasdRows = found.rows.length - 1;
     document.getElementById('reconSummary').textContent =
-      `إجمالي صفوف ملف رصد: ${totalRasdRows} — عدد الأصناف (دفعات) اللي عندها رصيد نشط ومش موجودة في Advac: ${phantom.length}`;
+      `إجمالي صفوف ملف رصد: ${totalRasdRows} — أصناف مفقودة بالكامل من Advac: ${missingGtins} — أصناف كميتها في Advac أقل من رصد: ${partialGtins} — إجمالي دفعات محتاجة تصحيح: ${correctionItems.length}`;
 
-    if (phantom.length > 0) {
+    if (correctionItems.length > 0) {
       document.getElementById('reconDownloadWrap').classList.remove('hidden');
       document.getElementById('reconGlnHint').style.display = 'block';
-      showMsg('reconMsg', 'ok', `تمت المطابقة — لقينا ${phantom.length} دفعة محتاجة تصحيح`);
+      showMsg('reconMsg', 'ok', `تمت المطابقة — لقينا ${correctionItems.length} دفعة محتاجة تصحيح`);
     } else {
-      showMsg('reconMsg', 'ok', 'تمت المطابقة — كل الأرصدة النشطة في رصد موجودة عندك في Advac، مفيش حاجة محتاجة تصحيح');
+      showMsg('reconMsg', 'ok', 'تمت المطابقة — كميات رصد مطابقة أو أقل من Advac في كل الأصناف، مفيش حاجة محتاجة تصحيح');
     }
 
     document.getElementById('reconAdvacInput').value = '';
@@ -1572,17 +1601,26 @@ async function runStockReconciliation() {
   }
 }
 
-function renderReconResultTable(phantom) {
+// بيحوّل تاريخ DD/MM/YYYY لرقم قابل للترتيب (أقدم تاريخ أولًا)
+function dmyToSortableDate(dmy) {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(dmy || ''));
+  if (!m) return 0;
+  return parseInt(m[3], 10) * 10000 + parseInt(m[2], 10) * 100 + parseInt(m[1], 10);
+}
+
+function renderReconResultTable(items) {
   const head = document.getElementById('reconResultHead');
   const body = document.getElementById('reconResultBody');
-  head.innerHTML = '<tr><th>GTIN</th><th>اسم الصنف</th><th>BN</th><th>XD</th><th>الكمية النشطة (Active)</th></tr>';
-  if (phantom.length === 0) {
-    body.innerHTML = '<tr><td colspan="5" class="empty">مفيش أصناف محتاجة تصحيح</td></tr>';
+  head.innerHTML = '<tr><th>GTIN</th><th>اسم الصنف</th><th>BN</th><th>XD</th><th>الكمية المطلوب تصحيحها</th><th>الكمية في Advac</th><th>إجمالي Active في رصد</th><th>الحالة</th></tr>';
+  if (items.length === 0) {
+    body.innerHTML = '<tr><td colspan="8" class="empty">مفيش أصناف محتاجة تصحيح</td></tr>';
     return;
   }
-  body.innerHTML = phantom.map(it =>
-    `<tr><td>${it.gtin}</td><td>${it.name}</td><td>${it.bn}</td><td>${it.xd}</td><td>${it.active}</td></tr>`
-  ).join('');
+  body.innerHTML = items.map(it => {
+    const typeLabel = it.type === 'missing' ? 'مفقود بالكامل من Advac' : 'كمية ناقصة في Advac';
+    const rowStyle = it.type === 'missing' ? '' : ' style="background:rgba(230,180,70,0.10);"';
+    return `<tr${rowStyle}><td>${it.gtin}</td><td>${it.name}</td><td>${it.bn}</td><td>${it.xd}</td><td>${it.qty}</td><td>${it.advacQty}</td><td>${it.totalActive}</td><td>${typeLabel}</td></tr>`;
+  }).join('');
 }
 
 // بيبني ملف رصد بنفس صيغة الرفع المعتادة (GTIN;QUANTITY;BN;XD) بدون سطر فاضي في الآخر
@@ -1592,7 +1630,7 @@ function buildReconciliationCsv(items) {
   items.forEach(it => {
     const key = it.gtin + '|' + it.bn + '|' + it.xd;
     if (!groups[key]) { groups[key] = { gtin: it.gtin, bn: it.bn, xd: it.xd, qty: 0 }; order.push(key); }
-    groups[key].qty += it.active;
+    groups[key].qty += it.qty;
   });
   const lines = ['GTIN;QUANTITY;BN;XD'];
   order.forEach(key => {
@@ -1604,8 +1642,11 @@ function buildReconciliationCsv(items) {
 
 function downloadReconExcelReport() {
   if (!reconPhantomItems || reconPhantomItems.length === 0) return;
-  const rows = [['GTIN', 'اسم الصنف', 'BN', 'XD', 'الكمية النشطة (Active)']];
-  reconPhantomItems.forEach(it => rows.push([it.gtin, it.name, it.bn, it.xd, it.active]));
+  const rows = [['GTIN', 'اسم الصنف', 'BN', 'XD', 'الكمية المطلوب تصحيحها', 'الكمية في Advac', 'إجمالي Active في رصد', 'الحالة']];
+  reconPhantomItems.forEach(it => rows.push([
+    it.gtin, it.name, it.bn, it.xd, it.qty, it.advacQty, it.totalActive,
+    it.type === 'missing' ? 'مفقود بالكامل من Advac' : 'كمية ناقصة في Advac'
+  ]));
   const ws = XLSX.utils.aoa_to_sheet(rows);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'تصحيح المخزون');

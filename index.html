@@ -166,6 +166,7 @@
       <div class="tab" id="exportLogTabBtn" onclick="showAppTab('exportlog')">سجل التصدير</div>
       <div class="tab" id="idfTabBtn" onclick="showAppTab('idf')">دليل الأدوية (IDF)</div>
       <div class="tab" id="mergeTabBtn" onclick="showAppTab('merge')">دمج الملفات</div>
+      <div class="tab" id="reconTabBtn" onclick="showAppTab('recon')">مطابقة المخزون</div>
       <div class="tab hidden" id="adminTabBtn" onclick="showAppTab('admin')">لوحة الإدارة</div>
     </div>
 
@@ -300,6 +301,46 @@
           <table id="mergeResultTable">
             <thead id="mergeResultHead"></thead>
             <tbody id="mergeResultBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- تبويب مطابقة المخزون ---- -->
+    <div id="reconTab" class="hidden">
+      <div class="card">
+        <h2 style="margin-top:0;">مطابقة المخزون مع رصد</h2>
+        <div class="hint" style="margin-top:0;">
+          ارفع ملف المخزون الحالي عندك على نظام Advac، وملف "عدد الأدوية" (Drug Count) اللي بتصدّره من رصد. الأداة هتطلع لك كل الأصناف اللي عندها رصيد <b>Active</b> في رصد بس مش موجودة خالص عندك في Advac (أرصدة وهمية/قديمة محتاجة تصحيح). مفيش أي بيانات بتتحفظ — الملفين بيترفعوا ويتقروا في المتصفح بس في كل مرة، ومفيش تخزين على أي سيرفر أو جوجل شيت.
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px;" class="recon-grid">
+          <div>
+            <label style="display:block; font-weight:600; margin-bottom:6px;">ملف مخزون Advac الحالي</label>
+            <input type="file" id="reconAdvacInput" accept=".xlsx,.xls,.csv" style="width:100%;">
+          </div>
+          <div>
+            <label style="display:block; font-weight:600; margin-bottom:6px;">ملف "عدد الأدوية" (Drug Count) من رصد</label>
+            <input type="file" id="reconRasdInput" accept=".xlsx,.xls,.csv" style="width:100%;">
+          </div>
+        </div>
+        <button class="btn-accent btn-small" style="margin-top:14px;" onclick="runStockReconciliation()">تنفيذ المطابقة</button>
+        <div id="reconMsg" class="msg"></div>
+        <div id="reconDownloadWrap" class="hidden" style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
+          <button class="btn-accent btn-small" onclick="downloadReconRasdFile()">⬇ تحميل ملف التصحيح (بصيغة رصد GTIN;QUANTITY;BN;XD)</button>
+          <button class="btn-ghost btn-small" onclick="downloadReconExcelReport()">⬇ تحميل تقرير Excel للمراجعة</button>
+        </div>
+        <div class="hint" id="reconGlnHint" style="margin-top:12px; display:none;">
+          حسب آلية تصحيح المخزون من رصد: لو الرصيد النشط (Active) عندهم أكبر من اللي موجود فعليًا عندك، التصحيح بيتم بتحويل الكمية الزيادة داخل نظام رصد لمنشأة الـGLN <b>8888888888888</b>. ارفع الملف اللي هتحمّله هنا كملف تحويل (Transfer) بنفس الطريقة اللي بترفع بيها ملفات رصد العادية، لحد ما ينزل من رصيدك.
+        </div>
+      </div>
+
+      <div class="card" id="reconResultCard" style="display:none;">
+        <h2 style="margin-top:0;">النتيجة</h2>
+        <div id="reconSummary" class="hint" style="margin-top:0;"></div>
+        <div style="overflow-x:auto;">
+          <table id="reconResultTable">
+            <thead id="reconResultHead"></thead>
+            <tbody id="reconResultBody"></tbody>
           </table>
         </div>
       </div>
@@ -457,11 +498,13 @@ function showAppTab(tab) {
   document.getElementById('exportLogTabBtn').classList.toggle('active', tab === 'exportlog');
   document.getElementById('idfTabBtn').classList.toggle('active', tab === 'idf');
   document.getElementById('mergeTabBtn').classList.toggle('active', tab === 'merge');
+  document.getElementById('reconTabBtn').classList.toggle('active', tab === 'recon');
   document.getElementById('adminTabBtn').classList.toggle('active', tab === 'admin');
   document.getElementById('scanTab').classList.toggle('hidden', tab !== 'scan');
   document.getElementById('exportLogTab').classList.toggle('hidden', tab !== 'exportlog');
   document.getElementById('idfTab').classList.toggle('hidden', tab !== 'idf');
   document.getElementById('mergeTab').classList.toggle('hidden', tab !== 'merge');
+  document.getElementById('reconTab').classList.toggle('hidden', tab !== 'recon');
   document.getElementById('adminTab').classList.toggle('hidden', tab !== 'admin');
   if (tab === 'admin') loadUsers();
   if (tab === 'exportlog') loadExportLog();
@@ -1352,6 +1395,205 @@ function downloadMergedResult() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'مدمج');
   XLSX.writeFile(wb, 'merged_' + Date.now() + '.xlsx');
+}
+
+// ============ مطابقة المخزون (Advac ضد رصد) ============
+let reconPhantomItems = null;
+
+// بيقرا كل شيتات الملف (مش بس الأول) عشان نقدر ندور على شيت/عمود "Active" فيهم
+function readWorkbookAllSheets(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target.result, { type: 'array' });
+        const sheets = {};
+        wb.SheetNames.forEach(name => {
+          sheets[name] = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: false, defval: '' });
+        });
+        resolve({ sheetNames: wb.SheetNames, sheets });
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = () => reject(new Error('تعذر قراءة الملف'));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+// بيحوّل أي صيغة تاريخ شائعة (DD-MM-YYYY أو YYYY-MM-DD أو DD/MM/YYYY) لصيغة رصد DD/MM/YYYY
+function normalizeDateToDMY(val) {
+  const s = String(val || '').trim();
+  if (!s) return '';
+  let m = /^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/.exec(s);
+  if (m) return `${m[1]}/${m[2]}/${m[3]}`;
+  m = /^(\d{4})[\/\-](\d{2})[\/\-](\d{2})$/.exec(s);
+  if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    const dd = String(d.getDate()).padStart(2, '0'), mm = String(d.getMonth() + 1).padStart(2, '0'), yyyy = d.getFullYear();
+    return `${dd}/${mm}/${yyyy}`;
+  }
+  return s;
+}
+
+// بيدور جوه ملف "عدد الأدوية" من رصد على الشيت اللي فيه GTIN + Active (سواء اسم الشيت Active نفسه، أو عمود جوه أي شيت)
+function findRasdActiveSheet(workbookData) {
+  const candidateOrder = [];
+  workbookData.sheetNames.forEach(name => {
+    if (String(name).trim().toLowerCase() === 'active') candidateOrder.push(name);
+  });
+  workbookData.sheetNames.forEach(name => {
+    if (!candidateOrder.includes(name)) candidateOrder.push(name);
+  });
+
+  for (const name of candidateOrder) {
+    const rows = workbookData.sheets[name];
+    if (!rows || rows.length < 1) continue;
+    const header = rows[0];
+    const gtinIdx = findColumnIndex(header, ['gtin', 'code']);
+    const activeIdx = findColumnIndex(header, ['active', 'active quantity', 'activeqty', 'active qty', 'نشط']);
+    if (gtinIdx !== -1 && activeIdx !== -1) {
+      return {
+        sheetName: name,
+        rows,
+        gtinIdx, activeIdx,
+        nameIdx: findColumnIndex(header, ['drug name', 'trade name', 'name']),
+        bnIdx: findColumnIndex(header, ['bn', 'batch', 'batch number', 'lot', 'lot number']),
+        xdIdx: findColumnIndex(header, ['expiry date', 'expiry', 'xd', 'exp date', 'exp'])
+      };
+    }
+  }
+  return null;
+}
+
+async function runStockReconciliation() {
+  const advacFile = document.getElementById('reconAdvacInput').files[0];
+  const rasdFile = document.getElementById('reconRasdInput').files[0];
+  clearMsg('reconMsg');
+  document.getElementById('reconResultCard').style.display = 'none';
+  document.getElementById('reconDownloadWrap').classList.add('hidden');
+  document.getElementById('reconGlnHint').style.display = 'none';
+
+  if (!advacFile || !rasdFile) { showMsg('reconMsg', 'error', 'لازم ترفع الملفين (Advac + رصد) الأول'); return; }
+
+  showMsg('reconMsg', 'ok', 'جاري القراءة والمطابقة...');
+  try {
+    // 1) ملف Advac: نبني منه مجموعة الـGTIN الموجودة فعليًا عند المستخدم
+    const advacRows = await readWorkbookSheet(advacFile);
+    if (advacRows.length < 2) throw new Error('ملف Advac فاضي');
+    const advacHeader = advacRows[0];
+    const advacGtinIdx = findColumnIndex(advacHeader, ['gtin', 'code']);
+    if (advacGtinIdx === -1) throw new Error('مش لاقي عمود GTIN في ملف Advac');
+    const advacQtyIdx = findColumnIndex(advacHeader, ['qty', 'quantity', 'balance', 'current qty', 'currentqty', 'stock', 'current stock']);
+
+    const advacQtyMap = {};
+    for (let i = 1; i < advacRows.length; i++) {
+      const row = advacRows[i];
+      const gtin = padGtinClient(row[advacGtinIdx]);
+      if (!gtin) continue;
+      let q = 1; // لو مفيش عمود كمية، مجرد وجود الصنف في الملف يعتبر "موجود"
+      if (advacQtyIdx !== -1) {
+        q = parseFloat(String(row[advacQtyIdx] || '0').replace(/,/g, '')) || 0;
+      }
+      advacQtyMap[gtin] = (advacQtyMap[gtin] || 0) + q;
+    }
+
+    // 2) ملف رصد: نلاقي الشيت/الأعمدة الصح (GTIN + Active + BN/XD/الاسم لو موجودين)
+    const rasdData = await readWorkbookAllSheets(rasdFile);
+    const found = findRasdActiveSheet(rasdData);
+    if (!found) throw new Error('مش لاقي عمود GTIN وعمود Active في ملف رصد (اتأكد إنه ملف "عدد الأدوية - Drug Count")');
+
+    const phantom = [];
+    for (let i = 1; i < found.rows.length; i++) {
+      const row = found.rows[i];
+      const gtin = padGtinClient(row[found.gtinIdx]);
+      if (!gtin) continue;
+      const activeQty = parseFloat(String(row[found.activeIdx] || '0').replace(/,/g, '')) || 0;
+      if (activeQty <= 0) continue; // مفيش رصيد نشط أصلًا، مش محتاج تصحيح
+      const advacQty = advacQtyMap[gtin] || 0;
+      if (advacQty > 0) continue; // موجود عند المستخدم في Advac، مش شبح
+
+      phantom.push({
+        gtin,
+        name: found.nameIdx !== -1 ? String(row[found.nameIdx] || '').trim() : '',
+        bn: found.bnIdx !== -1 ? String(row[found.bnIdx] || '').trim() : '',
+        xd: found.xdIdx !== -1 ? normalizeDateToDMY(row[found.xdIdx]) : '',
+        active: activeQty
+      });
+    }
+
+    reconPhantomItems = phantom;
+    renderReconResultTable(phantom);
+    document.getElementById('reconResultCard').style.display = 'block';
+
+    const totalRasdRows = found.rows.length - 1;
+    document.getElementById('reconSummary').textContent =
+      `إجمالي صفوف ملف رصد: ${totalRasdRows} — عدد الأصناف (دفعات) اللي عندها رصيد نشط ومش موجودة في Advac: ${phantom.length}`;
+
+    if (phantom.length > 0) {
+      document.getElementById('reconDownloadWrap').classList.remove('hidden');
+      document.getElementById('reconGlnHint').style.display = 'block';
+      showMsg('reconMsg', 'ok', `تمت المطابقة — لقينا ${phantom.length} دفعة محتاجة تصحيح`);
+    } else {
+      showMsg('reconMsg', 'ok', 'تمت المطابقة — كل الأرصدة النشطة في رصد موجودة عندك في Advac، مفيش حاجة محتاجة تصحيح');
+    }
+
+    document.getElementById('reconAdvacInput').value = '';
+    document.getElementById('reconRasdInput').value = '';
+  } catch (err) {
+    showMsg('reconMsg', 'error', 'خطأ: ' + err.message);
+  }
+}
+
+function renderReconResultTable(phantom) {
+  const head = document.getElementById('reconResultHead');
+  const body = document.getElementById('reconResultBody');
+  head.innerHTML = '<tr><th>GTIN</th><th>اسم الصنف</th><th>BN</th><th>XD</th><th>الكمية النشطة (Active)</th></tr>';
+  if (phantom.length === 0) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">مفيش أصناف محتاجة تصحيح</td></tr>';
+    return;
+  }
+  body.innerHTML = phantom.map(it =>
+    `<tr><td>${it.gtin}</td><td>${it.name}</td><td>${it.bn}</td><td>${it.xd}</td><td>${it.active}</td></tr>`
+  ).join('');
+}
+
+// بيبني ملف رصد بنفس صيغة الرفع المعتادة (GTIN;QUANTITY;BN;XD) بدون سطر فاضي في الآخر
+function buildReconciliationCsv(items) {
+  const groups = {};
+  const order = [];
+  items.forEach(it => {
+    const key = it.gtin + '|' + it.bn + '|' + it.xd;
+    if (!groups[key]) { groups[key] = { gtin: it.gtin, bn: it.bn, xd: it.xd, qty: 0 }; order.push(key); }
+    groups[key].qty += it.active;
+  });
+  const lines = ['GTIN;QUANTITY;BN;XD'];
+  order.forEach(key => {
+    const g = groups[key];
+    lines.push([g.gtin, g.qty, g.bn, g.xd].join(';'));
+  });
+  return lines.join('\r\n').replace(/[\r\n]+$/, '');
+}
+
+function downloadReconRasdFile() {
+  if (!reconPhantomItems || reconPhantomItems.length === 0) return;
+  const csvContent = buildReconciliationCsv(reconPhantomItems);
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'rasd_stock_correction_' + Date.now() + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadReconExcelReport() {
+  if (!reconPhantomItems || reconPhantomItems.length === 0) return;
+  const rows = [['GTIN', 'اسم الصنف', 'BN', 'XD', 'الكمية النشطة (Active)']];
+  reconPhantomItems.forEach(it => rows.push([it.gtin, it.name, it.bn, it.xd, it.active]));
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'تصحيح المخزون');
+  XLSX.writeFile(wb, 'stock_reconciliation_report_' + Date.now() + '.xlsx');
 }
 </script>
 </body>

@@ -326,7 +326,7 @@
         <button class="btn-accent btn-small" style="margin-top:14px;" onclick="runStockReconciliation()">تنفيذ المطابقة</button>
         <div id="reconMsg" class="msg"></div>
         <div id="reconDownloadWrap" class="hidden" style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
-          <button class="btn-accent btn-small" onclick="downloadReconRasdFile()">⬇ تحميل ملف التصحيح (بصيغة رصد GTIN;QUANTITY;BN;XD)</button>
+          <button class="btn-accent btn-small" onclick="openReconExportOptions()">⬇ تحميل ملف التصحيح (بصيغة رصد GTIN;QUANTITY;BN;XD)</button>
           <button class="btn-ghost btn-small" onclick="downloadReconExcelReport()">⬇ تحميل تقرير Excel للمراجعة</button>
         </div>
         <div class="hint" id="reconGlnHint" style="margin-top:12px; display:none;">
@@ -402,15 +402,17 @@
       <h2 id="exportOptionsTitle">تصدير للهيئة</h2>
       <div id="exportOptionsMsg" class="msg"></div>
 
-      <label style="font-size:13px; color:var(--text-dim); margin-bottom:6px;">صيغة الملف</label>
-      <label style="display:flex; align-items:center; gap:6px; margin-bottom:10px;">
-        <input type="radio" name="exportFormat" id="exportFormatDetailed" value="detailed" checked style="width:auto;">
-        تفصيلي — سطر لكل رقم تسلسلي (GTIN;SN;BN;XD)
-      </label>
-      <label style="display:flex; align-items:center; gap:6px; margin-bottom:16px;">
-        <input type="radio" name="exportFormat" id="exportFormatGrouped" value="grouped" style="width:auto;">
-        مجمّع حسب الدفعة مع الكمية (GTIN;QUANTITY;BN;XD)
-      </label>
+      <div id="exportFormatSection">
+        <label style="font-size:13px; color:var(--text-dim); margin-bottom:6px;">صيغة الملف</label>
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:10px;">
+          <input type="radio" name="exportFormat" id="exportFormatDetailed" value="detailed" checked style="width:auto;">
+          تفصيلي — سطر لكل رقم تسلسلي (GTIN;SN;BN;XD)
+        </label>
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:16px;">
+          <input type="radio" name="exportFormat" id="exportFormatGrouped" value="grouped" style="width:auto;">
+          مجمّع حسب الدفعة مع الكمية (GTIN;QUANTITY;BN;XD)
+        </label>
+      </div>
 
       <div style="border-top:1px solid var(--border); margin-bottom:16px;"></div>
 
@@ -981,11 +983,12 @@ function downloadCsvFile(fileName, content) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-let exportModalContext = 'new'; // 'new' أو 'redownload'
+let exportModalContext = 'new'; // 'new' أو 'redownload' أو 'recon'
 
 function openExportOptions() {
   exportModalContext = 'new';
   document.getElementById('exportOptionsTitle').textContent = 'تصدير للهيئة';
+  document.getElementById('exportFormatSection').classList.remove('hidden');
   clearMsg('exportOptionsMsg');
   document.getElementById('exportModeFull').checked = true;
   document.getElementById('exportFormatDetailed').checked = true;
@@ -993,6 +996,18 @@ function openExportOptions() {
   document.getElementById('exportOptionsModal').classList.remove('hidden');
 }
 function closeExportOptions() { document.getElementById('exportOptionsModal').classList.add('hidden'); }
+
+// بيفتح نفس مودال خيارات التصدير بس لملف تصحيح المخزون (مفيش صيغة تفصيلي هنا، بس مجمّع بالكمية)
+function openReconExportOptions() {
+  if (!reconPhantomItems || reconPhantomItems.length === 0) return;
+  exportModalContext = 'recon';
+  document.getElementById('exportOptionsTitle').textContent = 'تحميل ملف تصحيح المخزون';
+  document.getElementById('exportFormatSection').classList.add('hidden');
+  clearMsg('exportOptionsMsg');
+  document.getElementById('exportModeFull').checked = true;
+  document.getElementById('splitChunkSize').value = '20';
+  document.getElementById('exportOptionsModal').classList.remove('hidden');
+}
 
 async function confirmExport() {
   const isSplit = document.getElementById('exportModeSplit').checked;
@@ -1004,6 +1019,19 @@ async function confirmExport() {
       showMsg('exportOptionsMsg', 'error', 'اكتب عدد صفوف صحيح أكبر من صفر');
       return;
     }
+  }
+
+  if (exportModalContext === 'recon') {
+    const csvContent = buildReconciliationCsv(reconPhantomItems);
+    const outFileName = 'rasd_stock_correction_' + Date.now() + '.csv';
+    if (!isSplit) {
+      downloadCsvFile(outFileName, csvContent);
+    } else {
+      await downloadSplitZip(outFileName, csvContent, chunkSize);
+    }
+    closeExportOptions();
+    showMsg('reconMsg', 'ok', `تم تحميل ملف التصحيح (${reconPhantomItems.length} دفعة)${isSplit ? ' مقسّم على ملفات ZIP' : ''}`);
+    return;
   }
 
   if (exportModalContext === 'redownload') {
@@ -1572,18 +1600,6 @@ function buildReconciliationCsv(items) {
     lines.push([g.gtin, g.qty, g.bn, g.xd].join(';'));
   });
   return lines.join('\r\n').replace(/[\r\n]+$/, '');
-}
-
-function downloadReconRasdFile() {
-  if (!reconPhantomItems || reconPhantomItems.length === 0) return;
-  const csvContent = buildReconciliationCsv(reconPhantomItems);
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'rasd_stock_correction_' + Date.now() + '.csv';
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 function downloadReconExcelReport() {

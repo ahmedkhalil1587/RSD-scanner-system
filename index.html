@@ -311,7 +311,7 @@
       <div class="card">
         <h2 style="margin-top:0;">مطابقة المخزون مع رصد</h2>
         <div class="hint" style="margin-top:0;">
-          ارفع ملف المخزون الحالي عندك على نظام Advac، وملف "عدد الأدوية" (Drug Count) اللي بتصدّره من رصد. الأداة هتقارن كل صنف بالـGTIN وتطلع لك حالتين: (1) أصناف عندها رصيد <b>Active</b> في رصد ومش موجودة خالص عندك في Advac، و(2) أصناف موجودة في الاتنين بس الكمية في Advac أقل من إجمالي الـActive في رصد — وفي الحالة دي بتطلع لك الفرق بالظبط (موزّع على الدفعات الأقرب لانتهاء الصلاحية الأول). مفيش أي بيانات بتتحفظ — الملفين بيترفعوا ويتقروا في المتصفح بس في كل مرة، ومفيش تخزين على أي سيرفر أو جوجل شيت.
+          ارفع ملف المخزون الحالي عندك على نظام Advac، وملف "عدد الأدوية" (Drug Count) اللي بتصدّره من رصد. المطابقة بتتم على مرحلتين: (1) لو ملف Advac فيه عمود <b>ExpiryDate</b> (شهر/سنة الصلاحية)، الأداة بتطابق كل دفعة في رصد مع نفس الـGTIN وشهر/سنة الصلاحية بالظبط في Advac، وتقارن الكمية في الشهر ده تحديدًا؛ (2) لو شهر الصلاحية ده مش موجود في Advac لهذا الصنف، بترجع تلقائيًا لمقارنة إجمالي الكمية المتبقية للصنف ككل (موزّعة على الدفعات الأقرب لانتهاء الصلاحية الأول). في الحالتين هتطلع لك الأصناف المفقودة بالكامل والأصناف ذات الكمية الناقصة، مع توضيح طريقة المطابقة المستخدمة لكل صف. مفيش أي بيانات بتتحفظ — الملفين بيترفعوا ويتقروا في المتصفح بس في كل مرة، ومفيش تخزين على أي سيرفر أو جوجل شيت.
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px;" class="recon-grid">
           <div>
@@ -1512,8 +1512,11 @@ async function runStockReconciliation() {
     const advacGtinIdx = findColumnIndex(advacHeader, ['gtin', 'code']);
     if (advacGtinIdx === -1) throw new Error('مش لاقي عمود GTIN في ملف Advac');
     const advacQtyIdx = findColumnIndex(advacHeader, ['qty', 'quantity', 'balance', 'current qty', 'currentqty', 'stock', 'current stock']);
+    // عمود تاريخ الصلاحية في Advac (شهر/سنة فقط عادةً، زي ExpiryDate = 202706) — اختياري، لو موجود بنطابق بيه الأول
+    const advacExpIdx = findColumnIndex(advacHeader, ['expirydate', 'expiry_date', 'expiry month', 'expirymonth', 'exp month', 'expmonth']);
 
-    const advacQtyMap = {};
+    const advacQtyMap = {}; // gtin -> إجمالي الكمية في كل الشهور
+    const advacByGtinMonth = {}; // "gtin|yyyymm" -> الكمية في الشهر ده بالظبط
     for (let i = 1; i < advacRows.length; i++) {
       const row = advacRows[i];
       const gtin = padGtinClient(row[advacGtinIdx]);
@@ -1523,6 +1526,13 @@ async function runStockReconciliation() {
         q = parseFloat(String(row[advacQtyIdx] || '0').replace(/,/g, '')) || 0;
       }
       advacQtyMap[gtin] = (advacQtyMap[gtin] || 0) + q;
+      if (advacExpIdx !== -1) {
+        const ym = normalizeToYYYYMM(row[advacExpIdx]);
+        if (ym) {
+          const key = gtin + '|' + ym;
+          advacByGtinMonth[key] = (advacByGtinMonth[key] || 0) + q;
+        }
+      }
     }
 
     // 2) ملف رصد: نلاقي الشيت/الأعمدة الصح (GTIN + Active + BN/XD/الاسم لو موجودين)
@@ -1549,31 +1559,78 @@ async function runStockReconciliation() {
       });
     }
 
-    // 3) لكل GTIN: نقارن إجمالي الكمية النشطة في رصد مع الكمية الموجودة فعليًا في Advac
-    //    - لو مش موجود خالص في Advac => "مفقود بالكامل" وكل الدفعات بتتحسب
-    //    - لو موجود بس الكمية أقل => "كمية ناقصة" وبنوزّع الفرق على الدفعات (الأقرب لانتهاء الصلاحية الأول، باعتبارها الأرجح تكون قديمة/منتهية الفاعلية)
+    // 3) لكل GTIN، بنحاول نطابق أول حاجة على مستوى (GTIN + شهر/سنة الصلاحية) لو عمود ExpiryDate موجود في Advac:
+    //    - لو في دفعة/دفعات رصد لها نفس شهر/سنة الصلاحية موجودة في Advac => نقارن الكمية في الشهر ده بالظبط
+    //    - لو الشهر مش موجود خالص لهذا الـGTIN في Advac => شرط احتياطي: نرجع للمقارنة الإجمالية (كل الكميات المتبقية من Advac اللي مش متطابقة مع شهر تاني) مع ترتيب أقدم تاريخ صلاحية أولًا
     const correctionItems = [];
     gtinOrder.forEach(gtin => {
       const batches = rasdByGtin[gtin];
-      const totalActive = batches.reduce((s, b) => s + b.active, 0);
-      const advacQty = advacQtyMap[gtin] || 0;
-      if (advacQty >= totalActive) return; // مطابق أو Advac عنده أكتر، مفيش حاجة تتصحح
+      const advacGtinTotal = advacQtyMap[gtin] || 0;
 
-      const diffTotal = totalActive - advacQty;
-      const type = advacQty === 0 ? 'missing' : 'partial';
-      const sortedBatches = [...batches].sort((a, b) => a.xdSort - b.xdSort);
-
-      let remaining = diffTotal;
-      sortedBatches.forEach(b => {
-        if (remaining <= 0) return;
-        const take = Math.min(remaining, b.active);
-        if (take <= 0) return;
-        remaining -= take;
-        correctionItems.push({
-          gtin, name: b.name, bn: b.bn, xd: b.xd, qty: take,
-          type, advacQty, totalActive
-        });
+      // نقسّم دفعات رصد لمجموعات حسب شهر/سنة الصلاحية
+      const byMonth = {};
+      const monthOrder = [];
+      batches.forEach(b => {
+        const ym = dmyToYYYYMM(b.xd);
+        const key = ym || '__nodate__';
+        if (!byMonth[key]) { byMonth[key] = []; monthOrder.push(key); }
+        byMonth[key].push(b);
       });
+
+      let matchedAdvacUsed = 0;
+      const unmatchedBatches = [];
+
+      monthOrder.forEach(ym => {
+        const monthBatches = byMonth[ym];
+        const monthTotal = monthBatches.reduce((s, b) => s + b.active, 0);
+        const advacKey = gtin + '|' + ym;
+        const hasMonthMatch = ym !== '__nodate__' && advacByGtinMonth.hasOwnProperty(advacKey);
+
+        if (hasMonthMatch) {
+          const advacMonthQty = advacByGtinMonth[advacKey];
+          matchedAdvacUsed += advacMonthQty;
+          if (advacMonthQty >= monthTotal) return; // الشهر ده مطابق بالكامل، مفيش حاجة تتصحح فيه
+          const diff = monthTotal - advacMonthQty;
+          const type = advacMonthQty === 0 ? 'missing' : 'partial';
+          const sorted = [...monthBatches].sort((a, b) => a.xdSort - b.xdSort);
+          let remaining = diff;
+          sorted.forEach(b => {
+            if (remaining <= 0) return;
+            const take = Math.min(remaining, b.active);
+            if (take <= 0) return;
+            remaining -= take;
+            correctionItems.push({
+              gtin, name: b.name, bn: b.bn, xd: b.xd, qty: take,
+              type, advacQty: advacMonthQty, totalActive: monthTotal, matchedBy: 'شهر الصلاحية'
+            });
+          });
+        } else {
+          unmatchedBatches.push(...monthBatches);
+        }
+      });
+
+      // الشرط الاحتياطي: الدفعات اللي شهرها مش موجود في Advac، بنقارنها بالباقي من رصيد الـGTIN الإجمالي
+      // (اللي لسه مش متصرف على شهور متطابقة)، وبنبدأ بأقدم تاريخ صلاحية
+      if (unmatchedBatches.length > 0) {
+        const leftoverAdvac = Math.max(0, advacGtinTotal - matchedAdvacUsed);
+        const totalUnmatchedActive = unmatchedBatches.reduce((s, b) => s + b.active, 0);
+        if (leftoverAdvac < totalUnmatchedActive) {
+          const diff = totalUnmatchedActive - leftoverAdvac;
+          const type = leftoverAdvac === 0 ? 'missing' : 'partial';
+          const sorted = [...unmatchedBatches].sort((a, b) => a.xdSort - b.xdSort);
+          let remaining = diff;
+          sorted.forEach(b => {
+            if (remaining <= 0) return;
+            const take = Math.min(remaining, b.active);
+            if (take <= 0) return;
+            remaining -= take;
+            correctionItems.push({
+              gtin, name: b.name, bn: b.bn, xd: b.xd, qty: take,
+              type, advacQty: leftoverAdvac, totalActive: totalUnmatchedActive, matchedBy: 'إجمالي الصنف (احتياطي)'
+            });
+          });
+        }
+      }
     });
 
     reconPhantomItems = correctionItems;
@@ -1608,18 +1665,43 @@ function dmyToSortableDate(dmy) {
   return parseInt(m[3], 10) * 10000 + parseInt(m[2], 10) * 100 + parseInt(m[1], 10);
 }
 
+// بيحوّل تاريخ DD/MM/YYYY لمفتاح شهر/سنة بصيغة YYYYMM
+function dmyToYYYYMM(dmy) {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(dmy || ''));
+  if (!m) return '';
+  return m[3] + m[2];
+}
+
+// بيحوّل أي صيغة شهر/سنة شائعة من Advac (202706، 06/2027، 2027-06، أو تاريخ كامل) لصيغة موحّدة YYYYMM
+function normalizeToYYYYMM(val) {
+  const s = String(val || '').trim();
+  if (!s) return '';
+  if (/^\d{6}$/.test(s)) return s; // YYYYMM جاهزة
+  let m = /^(\d{1,2})[\/\-](\d{4})$/.exec(s); // MM/YYYY
+  if (m) return m[2] + m[1].padStart(2, '0');
+  m = /^(\d{4})[\/\-](\d{1,2})$/.exec(s); // YYYY/MM
+  if (m) return m[1] + m[2].padStart(2, '0');
+  m = /^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/.exec(s); // DD/MM/YYYY كامل، ناخد الشهر والسنة بس
+  if (m) return m[3] + m[2];
+  m = /^(\d{4})[\/\-](\d{2})[\/\-](\d{2})$/.exec(s); // YYYY-MM-DD كامل
+  if (m) return m[1] + m[2];
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) return String(d.getFullYear()) + String(d.getMonth() + 1).padStart(2, '0');
+  return '';
+}
+
 function renderReconResultTable(items) {
   const head = document.getElementById('reconResultHead');
   const body = document.getElementById('reconResultBody');
-  head.innerHTML = '<tr><th>GTIN</th><th>اسم الصنف</th><th>BN</th><th>XD</th><th>الكمية المطلوب تصحيحها</th><th>الكمية في Advac</th><th>إجمالي Active في رصد</th><th>الحالة</th></tr>';
+  head.innerHTML = '<tr><th>GTIN</th><th>اسم الصنف</th><th>BN</th><th>XD</th><th>الكمية المطلوب تصحيحها</th><th>الكمية في Advac</th><th>إجمالي Active في رصد</th><th>الحالة</th><th>طريقة المطابقة</th></tr>';
   if (items.length === 0) {
-    body.innerHTML = '<tr><td colspan="8" class="empty">مفيش أصناف محتاجة تصحيح</td></tr>';
+    body.innerHTML = '<tr><td colspan="9" class="empty">مفيش أصناف محتاجة تصحيح</td></tr>';
     return;
   }
   body.innerHTML = items.map(it => {
     const typeLabel = it.type === 'missing' ? 'مفقود بالكامل من Advac' : 'كمية ناقصة في Advac';
     const rowStyle = it.type === 'missing' ? '' : ' style="background:rgba(230,180,70,0.10);"';
-    return `<tr${rowStyle}><td>${it.gtin}</td><td>${it.name}</td><td>${it.bn}</td><td>${it.xd}</td><td>${it.qty}</td><td>${it.advacQty}</td><td>${it.totalActive}</td><td>${typeLabel}</td></tr>`;
+    return `<tr${rowStyle}><td>${it.gtin}</td><td>${it.name}</td><td>${it.bn}</td><td>${it.xd}</td><td>${it.qty}</td><td>${it.advacQty}</td><td>${it.totalActive}</td><td>${typeLabel}</td><td>${it.matchedBy || ''}</td></tr>`;
   }).join('');
 }
 
@@ -1642,10 +1724,11 @@ function buildReconciliationCsv(items) {
 
 function downloadReconExcelReport() {
   if (!reconPhantomItems || reconPhantomItems.length === 0) return;
-  const rows = [['GTIN', 'اسم الصنف', 'BN', 'XD', 'الكمية المطلوب تصحيحها', 'الكمية في Advac', 'إجمالي Active في رصد', 'الحالة']];
+  const rows = [['GTIN', 'اسم الصنف', 'BN', 'XD', 'الكمية المطلوب تصحيحها', 'الكمية في Advac', 'إجمالي Active في رصد', 'الحالة', 'طريقة المطابقة']];
   reconPhantomItems.forEach(it => rows.push([
     it.gtin, it.name, it.bn, it.xd, it.qty, it.advacQty, it.totalActive,
-    it.type === 'missing' ? 'مفقود بالكامل من Advac' : 'كمية ناقصة في Advac'
+    it.type === 'missing' ? 'مفقود بالكامل من Advac' : 'كمية ناقصة في Advac',
+    it.matchedBy || ''
   ]));
   const ws = XLSX.utils.aoa_to_sheet(rows);
   const wb = XLSX.utils.book_new();
